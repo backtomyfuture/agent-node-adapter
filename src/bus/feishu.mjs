@@ -1,0 +1,91 @@
+// 总线后端：飞书多维表格（一号后端）。
+// 只做三件事：拿 tenant token、读写记录、扛住同表并发写冲突（1254291）与限流重试。
+// 零依赖：用 Node >= 20 的全局 fetch。
+
+const API = "https://open.feishu.cn/open-apis";
+
+export class FeishuBus {
+  constructor({ appId, appSecret, baseToken, tables }) {
+    this.appId = appId;
+    this.appSecret = appSecret;
+    this.baseToken = baseToken;
+    this.tables = tables; // { tasks, messages, parts, runs, artifacts, agentCards }
+    this._token = null;
+    this._tokenExp = 0;
+  }
+
+  async tenantToken() {
+    if (this._token && Date.now() < this._tokenExp - 120_000) return this._token;
+    const r = await fetch(`${API}/auth/v3/tenant_access_token/internal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app_id: this.appId, app_secret: this.appSecret }),
+    });
+    const d = await r.json();
+    if (d.code !== 0) throw new Error("tenant token failed: " + d.msg);
+    this._token = d.tenant_access_token;
+    this._tokenExp = Date.now() + (d.expire ?? 7200) * 1000;
+    return this._token;
+  }
+
+  // 与参考实现同一套退避：写冲突 1254291 与 429/5xx 重试，其余错误直接抛。
+  async api(method, path, payload) {
+    let last = null;
+    for (const delay of [0, 2000, 5000, 15000]) {
+      if (delay) await new Promise((res) => setTimeout(res, delay));
+      try {
+        const r = await fetch(API + path, {
+          method,
+          headers: {
+            Authorization: "Bearer " + (await this.tenantToken()),
+            "Content-Type": "application/json",
+          },
+          body: payload !== undefined ? JSON.stringify(payload) : undefined,
+        });
+        if ([429, 500, 502, 503].includes(r.status)) {
+          last = new Error("http " + r.status);
+          continue;
+        }
+        const d = await r.json();
+        if (d.code === 1254291) {
+          last = new Error("write conflict 1254291");
+          continue;
+        }
+        if (d.code !== 0) throw new Error(`api code ${d.code}: ${d.msg}`);
+        return d.data;
+      } catch (e) {
+        if (e.message.startsWith("api code")) throw e;
+        last = e;
+      }
+    }
+    throw new Error("api retry exhausted: " + last);
+  }
+
+  async listRecords(table) {
+    const items = [];
+    let page = null;
+    for (;;) {
+      let path = `/bitable/v1/apps/${this.baseToken}/tables/${table}/records?page_size=100`;
+      if (page) path += "&page_token=" + page;
+      const d = await this.api("GET", path);
+      items.push(...(d.items ?? []));
+      if (d.has_more) page = d.page_token;
+      else return items;
+    }
+  }
+
+  createRecord(table, fields) {
+    return this.api("POST", `/bitable/v1/apps/${this.baseToken}/tables/${table}/records`, { fields });
+  }
+
+  updateRecord(table, recordId, fields) {
+    return this.api("PUT", `/bitable/v1/apps/${this.baseToken}/tables/${table}/records/${recordId}`, { fields });
+  }
+}
+
+// 飞书字段值常为单元素数组，取标量。
+export function f1(rec, name) {
+  const v = rec?.fields?.[name];
+  if (Array.isArray(v)) return v[0] ?? "";
+  return v ?? "";
+}
