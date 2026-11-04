@@ -10,7 +10,7 @@ import path from "node:path";
 import { FeishuBus, f1 } from "./bus/feishu.mjs";
 import { FeishuEventReceiver } from "./bus/feishu-events.mjs";
 
-export const DAEMON_VERSION = "node-0.1.0";
+export const DAEMON_VERSION = "node-0.2.0";
 const HOP_LIMIT = 8;
 const MAX_RETRIES = 2;
 const STALE_MIN = 20;
