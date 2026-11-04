@@ -1,1 +1,33 @@
-{"daily-briefing":{"command":"node scripts/briefing.js","desc":"每日早报：天气、热点、本机状态汇总","mode":"json","name":"每日早报","side_effect":"read"},"echo-test":{"command":"node ../src/executors/echo.mjs","desc":"链路自检：回显任务参数","mode":"json","name":"回声测试","side_effect":"read"},"ops-agent":{"command":"agy --dangerously-skip-permissions --print {prompt}","desc":"通用运维 Agent：终端/SSH 工具面，按指令现场发挥","mode":"agent","name":"运维 Agent","side_effect":"write","timeout_sec":900}}
+{
+ "daily-briefing": {
+  "command": "node scripts/briefing.js",
+  "desc": "每日早报：天气、热点、本机状态汇总",
+  "mode": "json",
+  "name": "每日早报",
+  "side_effect": "read"
+ },
+ "echo-test": {
+  "command": "node ../src/executors/echo.mjs",
+  "desc": "链路自检：回显任务参数",
+  "mode": "json",
+  "name": "回声测试",
+  "side_effect": "read"
+ },
+ "ops-agent": {
+  "command": "agy --dangerously-skip-permissions --print {prompt}",
+  "desc": "通用运维 Agent：终端/SSH 工具面，按指令现场发挥",
+  "mode": "agent",
+  "name": "运维 Agent",
+  "side_effect": "write",
+  "timeout_sec": 900
+ },
+ "lan-exec": {
+  "command": "agy --dangerously-skip-permissions --print {prompt}",
+  "context": "carrier",
+  "desc": "局域网型 Agent：命令经 carrier 在用户终端语境里代跑（macOS 局域网权限场景，见 DESIGN §9）",
+  "mode": "agent",
+  "name": "局域网 Agent",
+  "side_effect": "write",
+  "timeout_sec": 900
+ }
+}

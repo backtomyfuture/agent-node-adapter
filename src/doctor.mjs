@@ -8,6 +8,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
 import { f1 } from "./bus/feishu.mjs";
+import { pingCarrier } from "./carrier.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -88,6 +89,19 @@ export async function doctor(configDir, appDir) {
     info(cfg.events
       ? `唤醒方式：事件订阅（长连接）＋ ${cfg.sweepSec}s 对账兜底`
       : `唤醒方式：轮询 ${cfg.pollSec}s（事件订阅已关）`);
+    // carrier 语境（设计 §9）：有 context=carrier 的能力时才检查
+    try {
+      const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
+      const carrierCaps = Object.entries(cmds).filter(([, e]) => e.context === "carrier").map(([k]) => k);
+      if (carrierCaps.length) {
+        if (await pingCarrier(cfg.carrierSocket)) {
+          ok(`carrier 在线（能力 ${carrierCaps.join(", ")} 可用）`);
+        } else {
+          bad(`carrier 离线：能力 ${carrierCaps.join(", ")} 将标离线；请在终端里跑 hub-node host`);
+          problems++;
+        }
+      }
+    } catch { /* commands.json 已在前面报过 */ }
   }
 
   // 7. 自启状态（只报告，不动手）

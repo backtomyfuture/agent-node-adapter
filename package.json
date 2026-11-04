@@ -1,1 +1,1 @@
-{"bin":{"hub-node":"bin/hub-node.mjs"},"dependencies":{"@larksuiteoapi/node-sdk":"^1.76.0"},"description":"通用节点适配器：把任何一台终端变成多 Agent 中台的一个执行节点（认领 → 拉起 Agent → 收回执 → 落日志）","engines":{"node":">=20"},"license":"MIT","name":"agent-node-adapter","type":"module","version":"0.2.0"}
+{"bin":{"hub-node":"bin/hub-node.mjs"},"dependencies":{"@larksuiteoapi/node-sdk":"^1.76.0"},"description":"通用节点适配器：把任何一台终端变成多 Agent 中台的一个执行节点（认领 → 拉起 Agent → 收回执 → 落日志）","engines":{"node":">=20"},"license":"MIT","name":"agent-node-adapter","type":"module","version":"0.3.0"}

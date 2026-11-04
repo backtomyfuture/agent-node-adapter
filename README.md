@@ -40,12 +40,26 @@ hub-node service    # 注册开机自启（macOS launchd / Linux systemd 用户�
   - 加能力只改这个文件，守护进程每轮自动重读、启动时自动登记能力名片。
 - 凭据只存节点本地，绝不进总线；节点只发起出站连接，不开监听端口。
 
+### carrier：需要局域网的能力（macOS）
+
+macOS 上由 launchd 拉起的守护进程访问局域网会被系统本地网络隐私机制拦截
+（见 DESIGN.md §9）。需要局域网的能力，在 `commands.json` 的条目里加
+`"context": "carrier"`，再在你日常的终端（比如常开的 Ghostty/tmux 里）跑：
+
+```bash
+hub-node host     # 前台常驻，保持终端开启；Ctrl-C 退出
+```
+
+守护进程会经本地 unix socket 把这类命令交给 carrier 在终端语境里代跑；
+carrier 不在线时，这些能力在名片上自动标离线、任务明确拒收，绝不静默
+改走直跑。`hub-node doctor` 会报告 carrier 的在线状态。
+
 ## 里程碑
 
 - M1 内核移植 ✓
 - M2 飞书后端增强：事件订阅已落地（长连接接收器集成在守护进程内，事件即时唤醒＋低频对账兜底）；剩余能力名片细化
 - M3 安装与自启 ✓：curl 安装脚本、launchd/systemd 注册（`hub-node service`）、`doctor` 自检命令
-- M4 carrier context：macOS 局域网语境子进程（见 DESIGN.md §9）
+- M4 carrier context ✓：本地 socket 代跑、能力分流与离线标注（见上）
 - M5 文档与首个公开版本
 
 License: MIT

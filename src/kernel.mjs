@@ -1,7 +1,7 @@
 // 节点内核：单进程守护，只做协议——认领 / 心跳 / 拼 prompt / 拉起本机命令 / 解析回执 / 回写。
 // 「能干什么活」由节点本地配置 commands.json 决定（skill -> 命令模板），
 // 新增能力 = 改配置 + 启动时自动登记能力名片，不改本文件。
-// 参考实现：同项目的 Python 守护进程 worker-4.1（生产运行中），本文件为其 Node 移植。
+// 参考实现：同项目的 Python 守护进程 worker-4.1（已退役），本文件为其 Node 移植。
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -9,8 +9,9 @@ import os from "node:os";
 import path from "node:path";
 import { FeishuBus, f1 } from "./bus/feishu.mjs";
 import { FeishuEventReceiver } from "./bus/feishu-events.mjs";
+import { execViaCarrier, pingCarrier } from "./carrier.mjs";
 
-export const DAEMON_VERSION = "node-0.2.0";
+export const DAEMON_VERSION = "node-0.3.0";
 const HOP_LIMIT = 8;
 const MAX_RETRIES = 2;
 const STALE_MIN = 20;
@@ -61,6 +62,7 @@ export function loadConfig(configDir) {
     sweepSec: cfg.sweepSec ?? 900,
     events: cfg.events !== false,
     doorbellFile: cfg.doorbellFile ? cfg.doorbellFile.replace(/^~/, os.homedir()) : null,
+    carrierSocket: cfg.carrierSocket ? cfg.carrierSocket.replace(/^~/, os.homedir()) : path.join(configDir, "carrier.sock"),
     capPrefix: cfg.capPrefix ?? cfg.node,
     bus: new FeishuBus({ appId, appSecret, baseToken: cfg.baseToken, tables: cfg.tables }),
     configDir,
@@ -206,6 +208,18 @@ export class Kernel {
     return lines.join("\n");
   }
 
+  // 执行分流（executor × context）：默认 direct 在本进程直跑；
+  // 条目标了 context: "carrier" 时经本地 socket 交给用户终端里的 carrier
+  // 代跑（设计 §9），执行语义与直跑一致，只是换了进程语境。
+  async execFor(entry, command, stdinText, timeoutSec, cwd) {
+    if (entry?.context === "carrier") {
+      return execViaCarrier(this.cfg.carrierSocket, {
+        command, cwd, input: stdinText, timeoutSec,
+      });
+    }
+    return this.runShell(command, stdinText, timeoutSec, cwd);
+  }
+
   runShell(command, stdinText, timeoutSec, cwd) {
     return new Promise((resolve, reject) => {
       const env = { ...process.env };
@@ -254,7 +268,7 @@ export class Kernel {
         task_id: f1(task, "Task_ID"), title: f1(task, "Title"),
         skill, instruction: await this.instructionText(task),
       } };
-      const p = await this.runShell(command, JSON.stringify(envelope), timeout, cwd);
+      const p = await this.execFor(entry, command, JSON.stringify(envelope), timeout, cwd);
       if (p.code !== 0) throw new Error(`command exit ${p.code}: ${(p.stderr || p.stdout).slice(0, 500)}`);
       const lines = (p.stdout ?? "").trim().split("\n").filter(Boolean);
       if (!lines.length) throw new Error("command produced no output");
@@ -268,7 +282,7 @@ export class Kernel {
     let p;
     if (command.includes("{prompt}")) {
       const quoted = "'" + prompt.replaceAll("'", "'\\''") + "'";
-      p = await this.runShell(command.replace("{prompt}", quoted), null, timeout, cwd);
+      p = await this.execFor(entry, command.replace("{prompt}", quoted), null, timeout, cwd);
     } else {
       p = await this.runShell(command, prompt, timeout, cwd);
     }
@@ -290,6 +304,8 @@ export class Kernel {
         await this.bus.updateRecord(this.T.agentCards, r.record_id, upd);
       }
     }
+    const carrierUp = await pingCarrier(this.cfg.carrierSocket);
+    this._carrierUp = carrierUp;
     for (const [skill, entry] of Object.entries(this.commands)) {
       const capId = entry.cap_id || `CAP-${this.cfg.capPrefix}-${skill}`;
       if (have.has(capId)) continue;
@@ -297,12 +313,33 @@ export class Kernel {
         Cap_ID: capId, Node: this.cfg.node, Zone: this.cfg.zone,
         Skill_Name: entry.name ?? skill, Description: entry.desc ?? "",
         Skill_ID: skill, Side_Effect: entry.side_effect ?? "write",
-        Availability: "online", Dispatchable: "Yes",
+        Availability: entry.context === "carrier" && !carrierUp ? "offline" : "online", Dispatchable: "Yes",
         Daemon_Version: DAEMON_VERSION, Receive_Mode: receiveMode,
         Node_Desc: this.cfg.nodeDesc,
         Cap_Push: "No", Cap_Streaming: "No", Cap_State_History: "Yes",
       });
       log("registered capability " + capId);
+    }
+  }
+
+  // carrier 型能力的 Availability 跟随探活结果（设计 §9 铁律：离线标注，不静默降级）。
+  async syncCarrierAvailability() {
+    const carrierCaps = Object.entries(this.commands)
+      .filter(([, e]) => e.context === "carrier")
+      .map(([skill, e]) => e.cap_id || `CAP-${this.cfg.capPrefix}-${skill}`);
+    if (!carrierCaps.length) return;
+    const up = await pingCarrier(this.cfg.carrierSocket);
+    if (this._carrierUp === up) return;
+    this._carrierUp = up;
+    const rows = await this.bus.listRecords(this.T.agentCards);
+    for (const capId of carrierCaps) {
+      const row = rows.find((r) => f1(r, "Cap_ID") === capId);
+      if (row && f1(row, "Availability") !== (up ? "online" : "offline")) {
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, {
+          Availability: up ? "online" : "offline",
+        });
+        log(`carrier ${up ? "online" : "offline"}: ${capId} availability updated`);
+      }
     }
   }
 
@@ -446,6 +483,13 @@ export class Kernel {
       log("rejected (no capability) " + taskId);
       return;
     }
+    if (this.commands[skill]?.context === "carrier" && !(await pingCarrier(this.cfg.carrierSocket))) {
+      await this.writeMessage(task, "notice",
+        "拒收：本能力的执行语境为 carrier（用户终端代跑），但 carrier 当前离线；按规矩不静默改走直跑，请先在终端启动 hub-node host 后重派。");
+      await this.bus.updateRecord(this.T.tasks, task.record_id, { Status: "rejected" });
+      log("rejected (carrier offline) " + taskId);
+      return;
+    }
     await this.execute(task);
   }
 
@@ -530,6 +574,7 @@ export class Kernel {
           await this.ensureCapabilities();
           this._capsReady = true;
         }
+        await this.syncCarrierAvailability();
         this.loadCommands();
         const caps = await this.myCapabilities();
         const tasks = await this.bus.listRecords(this.T.tasks);
