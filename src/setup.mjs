@@ -171,7 +171,7 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(`  ✓ 应用 ${appId}，凭据来源：${secretSource}`);
 
     // 3. Base 与表发现
-    const baseInput = flags.base || (await ask("粘贴多维表格 Base 的链接（或直接给 token）"));
+    const baseInput = flags.base || (await ask("把多维表格 Base 的链接粘贴进来（打开 Base 页面复制网址即可，或直接给 token）"));
     const baseToken = extractBaseToken(baseInput);
     if (!baseToken) { console.error("  ✗ 没能从输入里解析出 Base token。"); return 2; }
     const bus = new FeishuBus({ appId, appSecret: secret, baseToken, tables: {} });
@@ -204,12 +204,24 @@ export async function runSetup(configDir, argv, appDir) {
     for (const n of REQUIRED_TABLES) tables[TABLE_KEYS[n]] = byName.get(n);
     console.log(`  ✓ Base 表发现完成（${REQUIRED_TABLES.length} 张标准表齐全）`);
 
-    // 4. 节点身份
+    // 4. 节点身份（交互只问两件：叫什么、在哪用；前缀自动取节点名末段，说明不问）
     const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || "node";
-    const node = flags.node || (await ask("节点名（中台里认这个名字）", hostDefault));
-    const zone = flags.zone || (await ask("所属区（home / work）", "home"));
-    const prefix = flags.prefix || (await ask("能力名前缀（登记为 CAP-<前缀>-<能力>）", node));
-    const nodeDesc = flags.desc ?? (await ask("节点一句话说明（可空）", ""));
+    const node = flags.node || (await ask("给这台机器起个节点名（中台按这个名字派活）", hostDefault));
+    let zone = flags.zone || null;
+    if (!zone) {
+      if (!interactive) zone = "home";
+      else {
+        const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
+        zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
+      }
+    }
+    const prefix = flags.prefix || node.split("-").filter(Boolean).pop() || node;
+    const nodeDesc = flags.desc ?? "";
+    if (interactive) {
+      console.log(`  · 即将配置：节点 ${node}（${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+      const go = await ask("开始配置？(Y/n)", "Y");
+      if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
+    }
 
     // 5. 写配置（已有 node.json 默认不覆盖）
     fs.mkdirSync(configDir, { recursive: true });
