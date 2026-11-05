@@ -49,11 +49,11 @@ APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… python3 schema/generate_schema.py  
 
 - 只借数据模型，不借通信：不实现 JSON-RPC / gRPC / HTTP+JSON / SSE / Webhook，节点只读写表。
 - 状态八态，拼写固定：`submitted`、`working`、`input-required`、`auth-required`、`completed`、`failed`、`canceled`（单 l）、`rejected`。
-- 节点允许的迁移：`submitted→working`（写 `Claimed_By`、`Heartbeat_At`，认领后回读校验，丢了就放手）；`working→completed | input-required | failed`；失败未达 `MAX_RETRIES` 或心跳超时回收时回 `submitted`；`submitted→auth-required | rejected | failed`（熔断）；已有 `result` 消息的 `submitted` 任务对账为 `completed`。`canceled` 只由发起方/枢纽写。
+- 节点允许的迁移：`submitted→working`（写 `Claimed_By`、`Heartbeat_At`，认领后回读校验，丢了就放手）；`working→completed | input-required | failed`；执行失败未达 `MAX_RETRIES` 或心跳超时回收时回 `submitted`（回收计入 `Retry_Count`、与执行失败共用上限，超限置 `failed` + notice）；执行成功但回执无效直接 `failed` + notice，提交总线中途失败只补齐提交，二者都不计重试、不重跑（标准 §4）；`submitted→auth-required | rejected | failed`（熔断）；已有 `result` 消息的 `submitted` 任务对账为 `completed`。`canceled` 只由发起方/枢纽写。
 - 终态不可变、不可重启：终态任务不得改回非终态。后续工作在同一 `Context_ID` 下新建任务，新任务首条 instruction 消息的 `Ref_Task_IDs` 指回前任。
 - 中断态在原任务续跑：`question` 之后出现 `answer` 就在同一任务继续（`resumeCheck`），禁止为答问题新开任务。
 - 状态与消息配套：`input-required` ↔ `question`，`auth-required` ↔ `auth_request`（`Status_Msg` 指向该 Msg_ID），`completed` ↔ `result`（有产物先登记 Artifacts），`failed` / `rejected` ↔ `notice` 说明原因。
-- 审批只认 `auth_decision` 消息，其 DataPart 为 `{"decision":"approve"}`；不认任务行上的标记。
+- 审批只认 `auth_decision` 消息的 DataPart（`{"decision":"approve"}`），且须 `From_Node=hub`、`Role=user`、`In_Reply_To` 等于任务当前 `Status_Msg`，同一请求多条决定以最新一条为准；不认 TextPart 文字和任务行上的标记（标准 §8.3）。
 - Messages、Parts 只追加，永不修改或删除。消息正文全在 Parts（`text` / `file` / `data` 三型，按 `Seq` 拼接）；任务参数在首条 instruction 消息的 DataPart，Tasks 表不存参数。
 - ID 形态：`MSG-<任务号>-NN`、`<父ID>-P<序号>`、`<任务ID>-A<序号>`、`<任务ID>-R<序号>`。`Role` 只有 `user` / `agent`。
 - 产物修订 = 同 `Name` 的新 `Artifact_ID`；内容是 FilePart 指针，大文件本体不入表。
@@ -63,12 +63,12 @@ APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… python3 schema/generate_schema.py  
 
 - 跳数熔断：`Hop_Count > 8` 时只写 Runs(failed) + notice 并置 `failed`，不执行。派生子任务 `Hop_Count = 父 + 1`，累加不清零（问人也不清）。
 - 结构化回执，不猜自然语言：agent 模式只认 ```` ```agent-ask ```` 代码块（→ input-required）与 `ARTIFACT:` / `ARTIFACT_NAME:` 行；json 模式只认 stdout 最后一行 JSON（`summary`、`artifact`、`artifact_name`、`need_input`）。扩展回执语法须同时改 `buildPrompt`、`parseAgentOutput` 与标准 §9。
-- 指令与数据分离：要执行什么命令、在哪个目录、用哪个语境，只来自本机 `commands.json`。不得新增从任务参数或消息正文读取 command / cwd / context / Agent / 权限的路径；现存唯一例外是 `params.timeout_sec`，不要扩大。注意：agent 模式的 `buildPrompt` 目前把指令文本与参数 JSON 直接拼进 prompt，尚未做到 DESIGN §8 要求的隔离，不要在此基础上再放宽。
+- 指令与数据分离：要执行什么命令、在哪个目录、用哪个语境，只来自本机 `commands.json`。不得新增从任务参数或消息正文读取 command / cwd / context / Agent / 权限的路径；现存唯一例外是 `params.timeout_sec`，不要扩大。标准 §9 已规定 agent 输入约定：指令文本、参数与答复只经本次执行的 `input.json` 作为数据传入，prompt 只含受信模板与文件路径，参数带执行控制键（command / cwd / context / agent 等）直接拒收。若 `buildPrompt` 仍把指令文本与参数 JSON 直接拼进 prompt，即属未达标准的存量缺口，不要在此基础上再放宽。
 - 失败要响：carrier 离线时对应能力标 `Availability=offline`、任务置 `rejected` + notice，绝不静默改走直跑；守护进程只连接 carrier，从不拉起它。
 - 只出不进：不开监听端口（carrier 的 unix socket 除外）、不做端口映射或隧道。
 - 凭据不入仓库、不入总线、不进日志：示例只用占位符；真实值在 600 权限的 env 文件里；setup 与 doctor 不打印凭据明文。
 - 建单顺序（枢纽侧）：先写 instruction 消息与 Parts，最后写 Tasks 行；Tasks 行是触发信号。
-- 机主审批红线：对外发消息、删改数据、花钱、提交表单、改权限的动作走 `Approval_Class=approve` 与 auth-required 流程。
+- 机主审批红线：对外发消息、删改数据、花钱、提交表单、改权限的动作走 `Approval_Class=approve` 与 auth-required 流程；生效级别取任务行 `Approval_Class` 与本机 `commands.json` 的 `approval_class` 下限中更严者，本地下限只收紧不放宽。枢纽审批回调必须校验操作者是机主。
 
 ## 禁止事项
 
