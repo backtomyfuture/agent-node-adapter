@@ -28,7 +28,8 @@ hub-node doctor     # 之后随时复检
 hub-node daemon     # 前台试跑（setup 里选了自启则已在跑）
 ```
 
-setup 只问三件事：用哪个 lark-cli 应用作节点身份、Base 链接、节点名。
+setup 是纯提示式：粘贴 Base 链接、给节点起个名、选一下机器在哪
+（家里/公司），最后确认一眼即可；用哪个应用在只有一个时自动选定。
 表 ID 发现、app.env / node.json 写入、commands.json 种子（echo-test）全部
 自动完成；凭据只在本机流转（lark-cli 配置 / macOS 钥匙串 → 本机 app.env，
 权限 600），绝不进总线。全参数化也可以：
