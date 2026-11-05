@@ -1,4 +1,4 @@
-# agent-node-adapter —— 多 Agent 中台（飞书多维表格总线）
+# lark-a2a-hub —— 多 Agent 中台（飞书多维表格总线）
 
 一套已经在生产运行的多 Agent 协作系统：**用飞书多维表格当消息总线与
 状态层**，数据模型借 A2A 协议；一个枢纽（hub）负责拆解、派发、审批与
@@ -28,7 +28,7 @@ flowchart LR
 ## 作为节点加入一个现成的中台
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/agent-node-adapter/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
 hub-node setup      # 纯提示式向导，见下
 ```
 

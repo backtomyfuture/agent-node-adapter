@@ -3,6 +3,10 @@
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
 `hub-node --version`；中台标准版本独立编号（现行 v3.0）。
 
+## 2026-11-05 — 项目更名为 lark-a2a-hub
+
+- 项目名由 `agent-node-adapter` 更名为 `lark-a2a-hub`（同步更新 `package.json`、`package-lock.json`、`install.sh` 及文档中的仓库地址 `backtomyfuture/lark-a2a-hub`）。
+
 ## 2026-11-05 — 全量设计与枢纽参考实现公开
 
 - 新增 `docs/`：中台标准 v3.0（standard.md）、系统架构（architecture.md）、

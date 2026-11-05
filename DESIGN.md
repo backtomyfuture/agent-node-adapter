@@ -143,7 +143,7 @@ node-adapter/
 
 ## 13. 已定事项
 
-- 项目名 agent-node-adapter；License MIT；Node 版本下限 20（跟随 LTS）。
+- 项目名 lark-a2a-hub；License MIT；Node 版本下限 20（跟随 LTS）。
 - 开源范围（2026-11-05 扩大）：节点适配器＋中台标准与全部设计文档＋
   枢纽参考实现，一并公开（见 `docs/` 与 `hub/`）。
 

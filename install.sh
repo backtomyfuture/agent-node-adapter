@@ -1,13 +1,13 @@
 #!/bin/sh
-# agent-node-adapter 一行安装：
-#   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/agent-node-adapter/main/install.sh | sh
+# lark-a2a-hub 一行安装：
+#   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
 # 布局：~/.hub-node/ 是配置目录（node.json / commands.json / app.env），
 #       ~/.hub-node/app/ 是程序本体，~/.local/bin/hub-node 是命令入口。
 # 重跑本脚本 = 更新程序（git pull 或重新下载），已有配置不覆盖。
 set -eu
 
-REPO_GIT="https://github.com/backtomyfuture/agent-node-adapter.git"
-REPO_TAR="https://codeload.github.com/backtomyfuture/agent-node-adapter/tar.gz/refs/heads/main"
+REPO_GIT="https://github.com/backtomyfuture/lark-a2a-hub.git"
+REPO_TAR="https://codeload.github.com/backtomyfuture/lark-a2a-hub/tar.gz/refs/heads/main"
 HOME_DIR="${HUB_NODE_HOME:-$HOME/.hub-node}"
 APP="$HOME_DIR/app"
 
@@ -29,7 +29,7 @@ else
   echo "未找到 git，改用压缩包安装…"
   TMP="$(mktemp -d)"
   curl -fsSL "$REPO_TAR" | tar xz -C "$TMP"
-  mv "$TMP"/agent-node-adapter-main "$APP"
+  mv "$TMP"/lark-a2a-hub-main "$APP"
   rm -rf "$TMP"
 fi
 
