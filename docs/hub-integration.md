@@ -12,9 +12,11 @@
    （`drive.file.bitable_record_changed_v1`），落盘备查，并驱动呈递与
    审批回调。
 3. **结果呈递**：把终态、待答（input-required）、待批（auth-required）
-   与拒收（rejected）及时带回操作者，靠 Tasks.Presented 防重复。
-4. **审批中继**：watcher 扫到 auth-required 就发审批卡；操作者的决定
-   由回调落成 auth_decision 消息并流转状态（标准 §8.3）。
+   与拒收（rejected）及时带回操作者。去重按 (Task_ID, Status_Msg)
+   （终态再带上 Status），已呈递键记在 Tasks.Metadata；Presented 只表示
+   当前这一态是否已呈递，不能单独当永久去重。
+4. **审批中继**：watcher 扫到 auth-required 就发审批卡；回调必须先确认
+   操作者是机主，再把决定落成 auth_decision 并流转状态（标准 §8.3）。
 5. **答复与续派**：操作者的答复写成 answer 消息追加到原任务；派生
    任务由枢纽或节点按熔断规则创建。
 6. **对账**：周期性扫表核对状态（漏呈补呈、重复回执按 ID 去重、陈旧
@@ -49,9 +51,10 @@
    让节点抢跑、读到空参数。
 2. **幂等**：同一业务意图复用同一 Idempotency_Key；节点与枢纽都按它
    查重。写请求中途断线≠没建成：先按幂等键回表确认，再决定是否重建。
-3. **审批类**：Approval_Class=approve 的任务，节点认领后会先置
-   auth-required 停手；枢纽不要绕过审批直接改状态放行——决定必须以
-   auth_decision 消息落表。
+3. **审批类**：Approval_Class=approve 的任务，节点在认领前（仍为
+   submitted）写 auth_request 并置 auth-required，不经 working。枢纽
+   不要绕过审批直接改状态放行——决定必须以 auth_decision 消息落表，
+   且 In_Reply_To 等于该任务当前 Status_Msg。
 4. **信号行（过渡手段）**：对只能被「Tasks 新增」唤醒的 automation 型
    节点，answer 需双写一条轻量 Tasks 信号行（标题注明「答复信号」、
    指向原 Task_ID 与 Msg_ID）仅作唤醒；信号行不承载内容、接收方勿当
@@ -61,28 +64,50 @@
 
 ```
 表变更事件 → event_receiver（长连接，防抖数秒）
-          → present_results --list 扫未呈递的可呈递状态
-          → 写入 present_queue.jsonl（每行 {record_id, task_id}）
-          → 任意消费者取走呈递 → present_results --mark 置 Presented=Yes
+          → present_results --list（--offset / next_offset 分页读全表）
+          → 写入 present_queue.jsonl
+            （每行 {record_id, task_id, status, status_msg}）
+          → 任意消费者取走呈递
+          → present_results --mark 置 Presented=Yes，
+            并把本次呈递键写入 Tasks.Metadata.presented_keys
 ```
 
+- 去重有两层，都不是「一个任务只呈递一次」：
+  - 扫描：中断态键是 (Task_ID, Status_Msg)；终态 Status_Msg 常被清空或
+    仍指向旧 question，键再带上 Status。键已在 Metadata.presented_keys
+    里则跳过。因此 question / auth_request 续跑后的新提问，以及最终
+    completed/failed，都会再次出现。
+  - 队列：按 (record_id, status, status_msg) 去重。同一任务进入新状态
+    时可以再入队；只按 record_id 去重会把后续结果卡住。
 - 队列文件就是**呈递接缝**：消费者可以是操作者的聊天 Agent、一个
   webhook 转发器或一段脚本；枢纽实现不关心队列下游是谁。
-- 事件通道之外保留周期扫表兜底（参考实现为 20 分钟）：捞事件丢失时
-  的漏呈，并顺带做接收端自愈检查（见运维）。
+- 事件通道之外用 `present_results.py --sweep` 做 20 分钟兜底：stdout
+  与 `--list` 相同（漏事件时的未呈递项），stderr 告警 working 且
+  Heartbeat_At 超过 20 分钟或为空的任务。枢纽只告警，不替节点回收租约
+  （节点只回收 Claimed_By 是自己的任务）。告警不要写进队列文件。
+  参考实现不附带 timer 单元，部署时加用户级 systemd timer
+  （`OnUnitActiveSec=20min`）或 crontab
+  `*/20 * * * *`。升级后尚无 presented_keys 的历史任务会再入队一次，
+  `--mark` 之后即按键去重。
 
 ## 审批回路（参考实现）
 
-1. `approval_watcher.py` 周期扫 Tasks：Status=auth-required 且未发过
-   卡（本地状态文件记 record_id）→ 用枢纽应用给操作者发交互卡片，
-   按钮 value 携带 `{decision, record_id, task_id}`。
-2. 操作者点击 → 卡片回调进 `event_receiver.py` 的 card-action 处理：
-   校验任务仍为 auth-required → 写 auth_decision 消息（TextPart 写
-   人话说明、DataPart 写 `{"decision": "approve"|"reject"}`）→
-   approve 回置 submitted（并清 Presented 以便最终结果再呈递一次），
-   reject 置 canceled → 回 toast 给操作者。
-3. 节点在下一轮唤醒时读到 auth_decision 才继续——**表中任何「已批准」
-   标记都不算数，只认这条消息**。
+1. `approval_watcher.py` 周期扫 Tasks。`HUB_OWNER_OPEN_ID` 为空则启动
+   即报错退出，不发空卡片。Status=auth-required 且未发过卡（本地状态
+   文件记 record_id）→ 用枢纽应用给机主发交互卡片，按钮 value 携带
+   `{decision, record_id, task_id}`。每成功发送一张就立刻落盘，中途
+   失败不会让已发出的卡在下一轮整批重发。
+2. 机主点击 → 卡片回调进 `event_receiver.py`：先比对
+   `data.event.operator.open_id` 与 `HUB_OWNER_OPEN_ID`。未配置机主、
+   或操作者不是机主：拒绝，不写 auth_decision，不改任务状态。卡片只发
+   给机主不能代替这一步。通过后校验任务仍为 auth-required，且
+   Status_Msg 非空 → 写 auth_decision（From_Node=hub、Role=user、
+   In_Reply_To=当前 Status_Msg；TextPart 写人话，DataPart 写
+   `{"decision": "approve"|"reject"}`）→ approve 回置 submitted，
+   **保留 Status_Msg 不清**（节点认领前用它核对 In_Reply_To），并清
+   Presented 以便最终结果再呈递一次；reject 置 canceled → 回 toast。
+3. 节点在下一轮唤醒时只认满足标准 §8.3 的 auth_decision——**表中任何
+   「已批准」标记都不算数，只认这条消息**。
 
 ## 协议接入型节点的唤醒
 

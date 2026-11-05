@@ -57,8 +57,14 @@ _scan_lock = __import__("threading").Lock()
 _scan_timer = None
 
 
+def _queue_key(obj):
+    """同一 record 进入新中断态或终态时要能再入队，不能只按 record_id 永久去重。"""
+    return (obj.get("record_id", ""), obj.get("status", "") or "",
+            obj.get("status_msg", "") or "")
+
+
 def _queue_scan():
-    """事件触发后（防抖）扫未呈递的终态任务，写入呈递队列，hook 会唤醒 agent 立即呈递。"""
+    """事件触发后（防抖）扫未呈递任务，写入呈递队列，hook 会唤醒 agent 立即呈递。"""
     import subprocess
     import sys
     global _scan_timer
@@ -83,17 +89,21 @@ def _queue_scan():
             with open(QUEUE) as f:
                 for line in f:
                     try:
-                        queued.add(json.loads(line)["record_id"])
+                        queued.add(_queue_key(json.loads(line)))
                     except Exception:
                         pass
         added = 0
         with open(QUEUE, "a") as f:
             for it in items:
-                if it["record_id"] not in queued:
-                    f.write(json.dumps({"record_id": it["record_id"],
-                                        "task_id": it.get("task_id", "")},
-                                       ensure_ascii=False) + "\n")
-                    added += 1
+                entry = {"record_id": it["record_id"],
+                         "task_id": it.get("task_id", ""),
+                         "status": it.get("status", "") or "",
+                         "status_msg": it.get("status_msg", "") or ""}
+                if _queue_key(entry) in queued:
+                    continue
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                queued.add(_queue_key(entry))
+                added += 1
         if added:
             print("present queue: +%d item(s)" % added, flush=True)
     except Exception as e:
@@ -120,9 +130,32 @@ def on_bitable_changed(data):
     _schedule_scan()
 
 
+def _dig(obj, name):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _operator_open_id(data):
+    """卡片回调上的操作者。SDK 是对象，测试或原始事件也可能是 dict。"""
+    event = _dig(data, "event")
+    operator = _dig(event, "operator")
+    open_id = _dig(operator, "open_id")
+    return (open_id or "").strip()
+
+
+def _reject_card(resp, toast, content):
+    toast.type = "error"
+    toast.content = content
+    resp.toast = toast
+    return resp
+
+
 def on_card_action(data):
-    """审批卡回调（标准 v3）：同意/驳回→写 auth_decision 消息（TextPart 说明＋DataPart
-    {decision}）＋任务回 submitted / canceled。"""
+    """审批卡回调（标准 §8.3）：先校验操作者是机主，再写 auth_decision
+    （In_Reply_To = 当前 Status_Msg）并流转状态。批准回 submitted 时保留 Status_Msg。"""
     import sys
     sys.path.insert(0, _HERE)
     from hub_api import BASE_TOKEN, MESSAGES, PARTS, TASKS, api, f1, list_records, update_record
@@ -131,8 +164,20 @@ def on_card_action(data):
 
     resp = P2CardActionTriggerResponse()
     toast = CallBackToast()
+    # 卡片只发给机主不能代替这一校验。未配置机主时拒绝，不能空跑成「谁点都算」。
+    owner = (os.environ.get("HUB_OWNER_OPEN_ID") or "").strip()
+    operator = _operator_open_id(data)
+    if not owner:
+        print("WARN card action rejected: HUB_OWNER_OPEN_ID is unset", flush=True)
+        return _reject_card(resp, toast, "未配置机主，已拒绝。")
+    if operator != owner:
+        print("WARN card action rejected: operator is not HUB_OWNER_OPEN_ID", flush=True)
+        return _reject_card(resp, toast, "只有机主可以审批。")
     try:
-        value = data.event.action.value or {}
+        value = _dig(_dig(data, "event"), "action")
+        value = _dig(value, "value") or {}
+        if not isinstance(value, dict):
+            raise RuntimeError("card action value is not an object")
         record_id = value.get("record_id", "")
         decision = value.get("decision", "")
         rows = [r for r in list_records(TASKS) if r["record_id"] == record_id]
@@ -143,6 +188,10 @@ def on_card_action(data):
             toast.type = "info"
             toast.content = "任务状态已变化，未重复处理。"
         elif decision in ("approve", "reject"):
+            # 节点只认 In_Reply_To 等于当前 Status_Msg 的决定；对不上就不写、不改状态。
+            status_msg = f1(task, "Status_Msg") or ""
+            if not status_msg:
+                raise RuntimeError("task Status_Msg is empty; refuse unbound auth_decision")
             task_id = f1(task, "Task_ID")
             msgs = [m for m in list_records(MESSAGES) if f1(m, "Task_ID") == task_id]
             msg_id = "MSG-%s-%02d" % (task_id.replace("TASK-", ""), len(msgs) + 1)
@@ -153,6 +202,7 @@ def on_card_action(data):
                     "Context_ID": f1(task, "Context_ID"),
                     "From_Node": "hub", "To_Node": f1(task, "Target_Node"),
                     "Role": "user", "Kind": "auth_decision",
+                    "In_Reply_To": status_msg,
                     "Created_At": time.strftime("%Y-%m-%d %H:%M")}})
             api("POST", "/bitable/v1/apps/%s/tables/%s/records" % (BASE_TOKEN, PARTS), {
                 "fields": {
@@ -166,9 +216,12 @@ def on_card_action(data):
                     "Parent_Type": "message", "Seq": 2, "Kind": "data",
                     "Data": json.dumps({"decision": decision})}})
             if decision == "approve":
+                # 回 submitted 后节点认领前仍用 Status_Msg 核对 auth_decision.In_Reply_To。
+                # 必须原样写回，不能顺手清空（标准 §8.3）。
                 update_record(TASKS, record_id, {
                     "Status": "submitted",
-                    "Presented": ""})  # 重置呈递标记：最终结果还要再呈递一次
+                    "Presented": "",
+                    "Status_Msg": status_msg})
                 toast.type = "success"
                 toast.content = "已批准，任务重新入队执行。"
             else:
