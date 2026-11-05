@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // hub-node —— 通用节点适配器命令行入口。
 // 子命令：
+//   setup    一键配置向导：装/复用 lark-cli、发现 Base 表、写配置、自检、自启
 //   daemon   常驻守护进程（认领 → 拉起 → 回执 → 落日志）
 //   doctor   本机自检：配置、凭据、总线连通、能力登记、自启状态（M3）
 //   service  注册/卸载开机自启：macOS launchd / Linux systemd 用户级（M3）
@@ -29,7 +30,10 @@ process.on("unhandledRejection", (e) => {
 
 const [cmd, ...rest] = process.argv.slice(2);
 
-if (cmd === "daemon") {
+if (cmd === "setup") {
+  const { runSetup } = await import("../src/setup.mjs");
+  process.exitCode = await runSetup(configDirFrom(rest), rest, APP_DIR);
+} else if (cmd === "daemon") {
   const cfg = loadConfig(configDirFrom(rest));
   await new Kernel(cfg).run();
 } else if (cmd === "doctor") {
@@ -46,6 +50,7 @@ if (cmd === "daemon") {
 } else {
   console.log(`hub-node ${DAEMON_VERSION}
 用法：
+  hub-node setup   [--config <dir>]    一键配置向导（首次装机跑这个）
   hub-node daemon  [--config <dir>]    常驻守护进程
   hub-node doctor  [--config <dir>]    本机自检
   hub-node service [--config <dir>]    注册开机自启（--remove 卸载）

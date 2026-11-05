@@ -57,10 +57,8 @@ ln -sf "$APP/bin/hub-node.mjs" "$HOME/.local/bin/hub-node"
 
 cat <<EOF
 
-安装完成。接下来：
-  1) 编辑 $HOME_DIR/node.json 与 $HOME_DIR/app.env
-  2) 自检：hub-node doctor
-  3) 先前台试跑：hub-node daemon
-  4) 注册开机自启：hub-node service
+安装完成。接下来只需一条命令完成全部配置：
+  hub-node setup
+（自动装/复用 lark-cli、发现 Base 表、写好配置并自检；细节见 README）
 若 hub-node 命令找不到，把 \$HOME/.local/bin 加入 PATH。
 EOF

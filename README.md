@@ -3,10 +3,11 @@
 把任何一台终端变成多 Agent 中台的一个执行节点：装上、配好，它就常驻后台，
 按「认领任务 → 拉起本机 Agent/脚本 → 收回执 → 落日志」的循环替中台干活。
 
-设计全文见 [DESIGN.md](DESIGN.md)。当前进度：M3——核心循环已从生产运行的
+设计全文见 [DESIGN.md](DESIGN.md)。当前进度：核心循环已从生产运行的
 Python 参考实现移植到 Node 并在生产节点全量切换，含飞书多维表格总线后端、
 命令模板执行（json / agent 两种模式）、能力自注册、提问/审批续跑、熔断与
-幂等对账、事件订阅唤醒（长连接＋低频对账兜底）。
+幂等对账、事件订阅唤醒（长连接＋低频对账兜底），以及一键配置向导
+（`hub-node setup`，见下）。
 
 ## 安装
 
@@ -17,16 +18,21 @@ curl -fsSL https://raw.githubusercontent.com/backtomyfuture/agent-node-adapter/m
 脚本把程序装到 `~/.hub-node/app`、配置放在 `~/.hub-node/`、命令入口链接到
 `~/.local/bin/hub-node`；重跑即更新，已有配置不覆盖。
 
-前置：Node >= 20；一个飞书应用（凭据以 `APP_ID`/`APP_SECRET` 放在本地 env 文件，
-或直接写进 node.json）与一张按中台标准建好的多维表格 Base。
+前置：Node >= 20；一张按中台标准建好的多维表格 Base。飞书应用不用预先
+准备：向导会装好 lark-cli 并复用它已配置的应用；本机还没有应用时，按向导
+提示先跑一次 `lark-cli config init` 即可。
 
 ```bash
-# 1) 编辑 ~/.hub-node/node.json（节点名、Base token、七表 ID）与 ~/.hub-node/app.env
-# 2) 按本机有的工具改 ~/.hub-node/commands.json 的命令模板
-hub-node doctor     # 自检：配置、凭据、总线连通、能力登记
-hub-node daemon     # 前台试跑
-hub-node service    # 注册开机自启（macOS launchd / Linux systemd 用户级；--remove 卸载）
+hub-node setup      # 一键配置：装/复用 lark-cli、自动发现 Base 表、写配置、自检、可顺带注册自启
+hub-node doctor     # 之后随时复检
+hub-node daemon     # 前台试跑（setup 里选了自启则已在跑）
 ```
+
+setup 只问三件事：用哪个 lark-cli 应用作节点身份、Base 链接、节点名。
+表 ID 发现、app.env / node.json 写入、commands.json 种子（echo-test）全部
+自动完成；凭据只在本机流转（lark-cli 配置 / macOS 钥匙串 → 本机 app.env，
+权限 600），绝不进总线。全参数化也可以：
+`hub-node setup --base <Base链接> --node <节点名> --yes --service`。
 
 手动安装等价于 clone 本仓库后 `npm install`，再把示例配置拷到配置目录。
 
@@ -60,6 +66,7 @@ carrier 不在线时，这些能力在名片上自动标离线、任务明确拒
 - M2 飞书后端增强：事件订阅已落地（长连接接收器集成在守护进程内，事件即时唤醒＋低频对账兜底）；剩余能力名片细化
 - M3 安装与自启 ✓：curl 安装脚本、launchd/systemd 注册（`hub-node service`）、`doctor` 自检命令
 - M4 carrier context ✓：本地 socket 代跑、能力分流与离线标注（见上）
+- 一键配置 ✓：`hub-node setup` 向导——装/复用 lark-cli、Base 表自动发现、配置全自动生成（v0.4.0）
 - M5 文档与首个公开版本
 
 License: MIT
