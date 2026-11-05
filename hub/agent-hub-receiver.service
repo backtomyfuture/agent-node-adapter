@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Hub event receiver (Feishu bitable record-changed, hub app)
+After=network-online.target
+
+[Service]
+# 部署时把 /opt/agent-hub 改成你的枢纽目录（三处）。
+# 凭据由 event_receiver.py 直接读同目录 hub.env；若出站需要代理，
+# 在 EnvironmentFile 里另给一份含 HTTPS_PROXY 的 env 文件即可。
+ExecStart=/usr/bin/python3 /opt/agent-hub/event_receiver.py
+Restart=always
+RestartSec=30
+WorkingDirectory=/opt/agent-hub
+
+[Install]
+WantedBy=default.target

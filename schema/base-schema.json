@@ -1,0 +1,731 @@
+{
+ "name": "Agent Hub Base（飞书多维表格）",
+ "generated_by": "schema/generate_schema.py",
+ "note": "结构事实由线上 Base 字段 API 生成；字段语义见 docs/base-schema.md 与 docs/standard.md。",
+ "tables": [
+  {
+   "name": "Tasks",
+   "role": "Task：一件工作的信封与状态机，一行一任务",
+   "fields": [
+    {
+     "name": "Title",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Task_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Source",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "muse",
+      "cron",
+      "manual",
+      "agent-derived",
+      "hub"
+     ]
+    },
+    {
+     "name": "Target_Node",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "home-mini",
+      "ipad",
+      "nas",
+      "grokbot",
+      "work-mba"
+     ]
+    },
+    {
+     "name": "Worker_Hint",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "amp",
+      "agy",
+      "droid",
+      "grok-cli",
+      "hermes",
+      "local-skill",
+      "other"
+     ]
+    },
+    {
+     "name": "Skill_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Status",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "submitted",
+      "working",
+      "input-required",
+      "auth-required",
+      "completed",
+      "failed",
+      "canceled",
+      "rejected"
+     ]
+    },
+    {
+     "name": "Approval_Class",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "auto",
+      "notify",
+      "approve"
+     ]
+    },
+    {
+     "name": "Hop_Count",
+     "ui_type": "Number",
+     "type": 2,
+     "primary": false
+    },
+    {
+     "name": "Idempotency_Key",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Worktree",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Latest_Run",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Presented",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Claimed_By",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Heartbeat_At",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Retry_Count",
+     "ui_type": "Number",
+     "type": 2,
+     "primary": false
+    },
+    {
+     "name": "Context_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Status_Msg",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Metadata",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    }
+   ]
+  },
+  {
+   "name": "Messages",
+   "role": "Message：任务内全部对话轮次，只追加，一行一消息（正文在 Parts）",
+   "fields": [
+    {
+     "name": "Msg_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Task_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Context_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "From_Node",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "To_Node",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Role",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "user",
+      "agent"
+     ]
+    },
+    {
+     "name": "Kind",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "instruction",
+      "question",
+      "answer",
+      "auth_request",
+      "auth_decision",
+      "progress",
+      "result",
+      "notice"
+     ]
+    },
+    {
+     "name": "Artifact_Ref",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "In_Reply_To",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Created_At",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Ref_Task_IDs",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Metadata",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    }
+   ]
+  },
+  {
+   "name": "Parts",
+   "role": "Part：消息与产物的内容块，一行一块，text/file/data 三型",
+   "fields": [
+    {
+     "name": "Part_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Parent_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Parent_Type",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "message",
+      "artifact"
+     ]
+    },
+    {
+     "name": "Seq",
+     "ui_type": "Number",
+     "type": 2,
+     "primary": false
+    },
+    {
+     "name": "Kind",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "text",
+      "file",
+      "data"
+     ]
+    },
+    {
+     "name": "Text",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "File_URI",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "File_Name",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Mime_Type",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Data",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Metadata",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    }
+   ]
+  },
+  {
+   "name": "Runs",
+   "role": "（本地表）每次执行的起止、结果与报错",
+   "fields": [
+    {
+     "name": "Run_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Task_Ref",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Node",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Worker",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Error_Log",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Started_At",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Finished_At",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Outcome",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "succeeded",
+      "failed",
+      "paused"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Artifacts",
+   "role": "Artifact：交付物登记，内容为其 FilePart，修订＝同名新 ID",
+   "fields": [
+    {
+     "name": "Artifact_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Task_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Context_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Name",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Is_Final",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Created_By",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Created_At",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Description",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Metadata",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    }
+   ]
+  },
+  {
+   "name": "AgentCards",
+   "role": "AgentCard 规范化展开：一行一项能力",
+   "fields": [
+    {
+     "name": "Cap_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Node",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "home-mini",
+      "ipad",
+      "nas",
+      "work-mba",
+      "work-5070ti",
+      "grokbot",
+      "node-dev",
+      "m3test",
+      "setuptest"
+     ]
+    },
+    {
+     "name": "Zone",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "personal",
+      "unit",
+      "home",
+      "test",
+      "work"
+     ]
+    },
+    {
+     "name": "Description",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Required_Assets",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Skill_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Side_Effect",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "read-only",
+      "write",
+      "external",
+      "read"
+     ]
+    },
+    {
+     "name": "Availability",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "24x7",
+      "work-hours",
+      "on-demand",
+      "online",
+      "offline"
+     ]
+    },
+    {
+     "name": "Dispatchable",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Daemon_Version",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Node_Desc",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Receive_Mode",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "poll",
+      "automation",
+      "webhook",
+      "event"
+     ]
+    },
+    {
+     "name": "Skill_Name",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Tags",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Examples",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Input_Modes",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Output_Modes",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Default_Input_Modes",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Default_Output_Modes",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Cap_Streaming",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Cap_Push",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Cap_State_History",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Rules_路由规则",
+   "role": "（本地表）路由与审批策略的唯一现行来源",
+   "fields": [
+    {
+     "name": "Rule_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": true
+    },
+    {
+     "name": "Match_Type",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Target_Node",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "home-mini",
+      "ipad",
+      "nas",
+      "grokbot"
+     ]
+    },
+    {
+     "name": "Worker_Hint",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Skill_ID",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    },
+    {
+     "name": "Approval_Class",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "auto",
+      "notify",
+      "approve"
+     ]
+    },
+    {
+     "name": "Priority",
+     "ui_type": "Number",
+     "type": 2,
+     "primary": false
+    },
+    {
+     "name": "Enabled",
+     "ui_type": "SingleSelect",
+     "type": 3,
+     "primary": false,
+     "options": [
+      "Yes",
+      "No"
+     ]
+    },
+    {
+     "name": "Note",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
+    }
+   ]
+  }
+ ]
+}
