@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 // 总线后端：飞书多维表格（一号后端）。
 // 只做三件事：拿 tenant token、读写记录、扛住同表并发写冲突（1254291）与限流重试。
 // 零依赖：用 Node >= 20 的全局 fetch。
@@ -74,8 +76,21 @@ export class FeishuBus {
     }
   }
 
-  createRecord(table, fields) {
-    return this.api("POST", `/bitable/v1/apps/${this.baseToken}/tables/${table}/records`, { fields });
+  async getRecord(table, recordId) {
+    const d = await this.api("GET", `/bitable/v1/apps/${this.baseToken}/tables/${table}/records/${recordId}`);
+    return d.record;
+  }
+
+  // clientToken 可选。传入则原样写入查询参数；不传则本次调用生成一个。
+  // api() 的退避重试复用同一条 path，因此同一个 token 不会在响应丢失后插出第二行。
+  createRecord(table, fields, clientToken) {
+    const token = clientToken || randomUUID();
+    const q = "client_token=" + encodeURIComponent(token);
+    return this.api(
+      "POST",
+      `/bitable/v1/apps/${this.baseToken}/tables/${table}/records?${q}`,
+      { fields },
+    );
   }
 
   updateRecord(table, recordId, fields) {

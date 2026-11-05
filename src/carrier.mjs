@@ -14,7 +14,8 @@
 //   请求 {"type":"ping"}
 //   响应 {"type":"pong","pid":123}
 //   请求 {"type":"exec","id":"...","command":"...","cwd":"...","input":"...","timeout_sec":600}
-//   响应 {"id":"...","code":0,"signal":null,"stdout":"...","stderr":"..."}
+//   中间 {"id","status":"queued"|"running"}  排队阶段客户端不计执行超时
+//   响应 {"id","status":"done","code":0,"signal":null,"stdout":"...","stderr":"..."}
 
 import fs from "node:fs";
 import net from "node:net";
@@ -68,13 +69,64 @@ export async function pingCarrier(socketPath, timeoutMs = 800) {
   return r?.type === "pong";
 }
 
+function coerceTimeoutSec(raw, fallback = 600) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// 服务端串行队列：排队阶段不按本命令的执行超时掐断，从 running 起才计时。
+// 否则排在长任务后面的短超时请求会在还没开跑时被客户端误判为超时。
+function carrierExecRoundTrip(socketPath, frame, timeoutSec) {
+  const execMs = (timeoutSec + 20) * 1000;
+  const queueMs = 24 * 60 * 60 * 1000;
+  return new Promise((resolve) => {
+    let done = false;
+    let buf = "";
+    let timer = null;
+    const sock = net.createConnection(socketPath);
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      try { sock.destroy(); } catch { /* 已断开 */ }
+      resolve(v);
+    };
+    const arm = (ms) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => finish(null), ms);
+      timer.unref?.();
+    };
+    const take = (msg) => {
+      if (msg?.id && frame.id && msg.id !== frame.id) return;
+      if (msg?.status === "queued") { arm(queueMs); return; }
+      if (msg?.status === "running") { arm(execMs); return; }
+      finish(msg);
+    };
+    arm(execMs);
+    sock.on("error", () => finish(null));
+    sock.on("connect", () => sock.write(JSON.stringify(frame) + "\n"));
+    sock.on("data", (d) => {
+      buf += d;
+      let nl;
+      while (!done && (nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        try { take(JSON.parse(line)); } catch { finish(null); return; }
+      }
+    });
+    sock.on("close", () => finish(null));
+  });
+}
+
 // 经 carrier 执行命令，返回形状与内核 runShell 一致：{code, signal, stdout, stderr}。
 export async function execViaCarrier(socketPath, { command, cwd, input, timeoutSec }) {
+  const sec = coerceTimeoutSec(timeoutSec);
   const id = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const r = await carrierRoundTrip(
+  const r = await carrierExecRoundTrip(
     socketPath,
-    { type: "exec", id, command, cwd: cwd ?? "", input: input ?? null, timeout_sec: timeoutSec },
-    (timeoutSec + 15) * 1000,
+    { type: "exec", id, command, cwd: cwd ?? "", input: input ?? null, timeout_sec: sec },
+    sec,
   );
   if (!r) throw new Error("carrier 无响应（不在线或执行超时）");
   if (r.id !== id) throw new Error("carrier 响应 id 不匹配");
@@ -82,24 +134,94 @@ export async function execViaCarrier(socketPath, { command, cwd, input, timeoutS
   return { code: r.code, signal: r.signal ?? null, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-// 与内核 runShell 语义一致的本地执行（shell、PATH 前缀、超时、双流捕获）。
-function runLocal(command, stdinText, timeoutSec, cwd) {
+const KILL_GRACE_MS = 2500;
+
+function killProcessGroup(child, sig) {
+  if (!child?.pid) return;
+  try { process.kill(-child.pid, sig); }
+  catch {
+    try { child.kill(sig); } catch { /* 已退出 */ }
+  }
+}
+
+// 独立进程组执行。超时先向整组发 SIGTERM，宽限后再 SIGKILL，并拆掉 stdio，
+// 避免 shell 死后孙进程继续占着管道，使 close 永远不来。
+export function runDetachedCommand(command, stdinText, timeoutSec, cwd) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
     const extra = ["/opt/homebrew/bin", path.join(os.homedir(), ".local/bin"), "/usr/local/bin"];
     env.PATH = [...extra, env.PATH ?? "/usr/bin:/bin"].join(":");
-    const p = spawn(command, {
-      shell: true, cwd: cwd || os.homedir(), env,
-      timeout: timeoutSec * 1000,
+    const sec = Number(timeoutSec);
+    const ms = Math.min(2_147_483_647, Math.max(0, Number.isFinite(sec) ? sec : 0) * 1000);
+    let p;
+    try {
+      p = spawn(command, {
+        shell: true,
+        cwd: cwd || os.homedir(),
+        env,
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    let out = "";
+    let err = "";
+    let settled = false;
+    let timer = null;
+    let killTimer = null;
+    const clearTimers = () => {
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      timer = null;
+      killTimer = null;
+    };
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      fn(value);
+    };
+    const dropStdio = () => {
+      for (const s of [p.stdin, p.stdout, p.stderr]) {
+        try { s?.destroy(); } catch { /* 已关 */ }
+      }
+    };
+    p.stdout?.on("data", (d) => { out += d; });
+    p.stderr?.on("data", (d) => { err += d; });
+    p.on("error", (e) => finish(reject, e));
+    // EPIPE 表示对端已经退出，交给 close 收口，不能把守护进程打崩。
+    p.stdin?.on("error", (e) => {
+      if (e?.code === "EPIPE" || e?.code === "ERR_STREAM_DESTROYED") return;
+      finish(reject, e);
     });
-    let out = "", err = "";
-    p.stdout.on("data", (d) => (out += d));
-    p.stderr.on("data", (d) => (err += d));
-    p.on("error", reject);
-    p.on("close", (code, signal) => resolve({ code, signal, stdout: out, stderr: err }));
-    if (stdinText != null) p.stdin.write(stdinText);
-    p.stdin.end();
+    p.on("close", (code, signal) => finish(resolve, { code, signal, stdout: out, stderr: err }));
+    timer = setTimeout(() => {
+      killProcessGroup(p, "SIGTERM");
+      if (settled) return;
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        killProcessGroup(p, "SIGKILL");
+        dropStdio();
+        if (settled) return;
+        killTimer = setTimeout(() => {
+          finish(resolve, { code: null, signal: "SIGKILL", stdout: out, stderr: err });
+        }, 500);
+      }, KILL_GRACE_MS);
+    }, ms);
+    try {
+      if (stdinText != null) p.stdin.write(stdinText);
+      p.stdin.end();
+    } catch (e) {
+      if (e?.code !== "EPIPE") finish(reject, e);
+    }
   });
+}
+
+// 与内核 runShell 语义一致的本地执行（shell、PATH 前缀、超时、双流捕获）。
+function runLocal(command, stdinText, timeoutSec, cwd) {
+  return runDetachedCommand(command, stdinText, timeoutSec, cwd);
 }
 
 // hub-node host：carrier 进程本体。在用户终端里前台常驻。
@@ -134,20 +256,27 @@ export async function startCarrier(configDir) {
         if (frame.type === "ping") {
           sock.write(JSON.stringify({ type: "pong", pid: process.pid }) + "\n");
         } else if (frame.type === "exec") {
+          try { sock.write(JSON.stringify({ id: frame.id, status: "queued" }) + "\n"); }
+          catch { continue; }
           enqueue(async () => {
             const t0 = new Date().toISOString().slice(11, 19);
             console.log(`[${t0}] exec: ${String(frame.command).slice(0, 100)}`);
+            const write = (obj) => {
+              if (sock.destroyed) return;
+              try { sock.write(JSON.stringify(obj) + "\n"); } catch { /* 客户端已走 */ }
+            };
             try {
+              write({ id: frame.id, status: "running" });
               const r = await runLocal(
                 String(frame.command),
                 frame.input ?? null,
-                Number(frame.timeout_sec || 600),
+                coerceTimeoutSec(frame.timeout_sec),
                 frame.cwd || undefined,
               );
               console.log(`[${t0}] done: code=${r.code}`);
-              sock.write(JSON.stringify({ id: frame.id, ...r }) + "\n");
+              write({ id: frame.id, status: "done", ...r });
             } catch (e) {
-              sock.write(JSON.stringify({ id: frame.id, error: String(e?.message ?? e) }) + "\n");
+              write({ id: frame.id, status: "done", error: String(e?.message ?? e) });
             }
           });
         }

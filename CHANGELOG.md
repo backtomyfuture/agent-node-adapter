@@ -3,6 +3,36 @@
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
 `hub-node --version`；中台标准版本独立编号（现行 v3.0）。
 
+## [0.5.0] - 2026-11-05
+
+- 中台标准 v3.0 补订（第二评审收敛，表结构不变；见
+  `docs/reviews/2026-11-05-optimization.md`）：
+  - §4/§8.1：执行失败才计入重试；执行成功但回执无效直接 failed＋notice，
+    提交总线中途失败只补齐提交，均不重跑、不重做副作用。
+  - §8.3：approve 类任务在认领前 submitted→auth-required；生效审批级别取
+    任务行与节点 `approval_class` 中更严者；枢纽回调须校验操作者是机主；
+    有效 auth_decision 须 From_Node=hub、Role=user、In_Reply_To 等于当前
+    Status_Msg、以最新一条为准、只认 DataPart。
+  - §8.4：Idempotency_Key 在非 failed/canceled 任务中只执行一次，重复者
+    rejected＋notice 指向原任务；心跳回收计入 Retry_Count，超限 failed＋notice。
+  - §8.5：呈递去重按 (Task_ID, Status_Msg)，已呈递 Msg_ID 记入 Tasks.Metadata。
+  - §9：agent 输入约定，指令与数据经 `input.json` 隔离，参数带执行控制键直接拒收。
+- 节点 P0/P1/P2：写状态前重读，终态或认领人已变则放手；配置目录单实例锁；
+  心跳回收并入每轮对账并与收尾写串行。执行与提交分离，创建记录带
+  client_token，提交中断只补齐 outbox。carrier 命令不再静默直跑，stdin
+  EPIPE 不击穿进程；超时杀掉进程组，`timeout_sec` 夹在本机上限内。指令、
+  问答与 FilePart 只经 `input.json`；续跑走同一套 preflight。能力表热更新，
+  解析失败保留上一版。消息按轮建索引。幂等键查重；认领后开 Run、结束时关行。
+- 枢纽 P0-3/P1-3/P1-8/P2-6：审批回调核对机主 open_id，未配置则拒绝；批准回
+  submitted 时保留 Status_Msg。呈递全表翻页，按 (Task_ID, Status_Msg) 去重，
+  键写入 Metadata；`--sweep` 作 20 分钟兜底并告警陈旧 working。审批卡展示
+  待执行正文（凭据样键名脱敏），每成功一张立即落状态。自愈脚本失败打印
+  BROKEN 并以非 0 退出。
+- 装机与运维 P1-4/P2-5/P2-7：首装不再种下会挡住 setup 的示例配置；移除
+  `--app-secret`，Secret 输入不回显，app.env 非 600 不读。doctor 把 socket
+  在线与局域网可达分开，新增 `--probe`。配置加载失败打出原因、退避后以非 0
+  退出。`DAEMON_VERSION` 为 `node-0.5.0`。
+
 ## 2026-11-05 — 项目更名为 lark-a2a-hub
 
 - 项目名由 `agent-node-adapter` 更名为 `lark-a2a-hub`（同步更新 `package.json`、`package-lock.json`、`install.sh` 及文档中的仓库地址 `backtomyfuture/lark-a2a-hub`）。
