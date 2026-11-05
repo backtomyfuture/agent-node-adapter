@@ -1,8 +1,11 @@
 #!/bin/sh
 # lark-a2a-hub 一行安装：
 #   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
-# 布局：~/.hub-node/ 是配置目录（node.json / commands.json / app.env），
-#       ~/.hub-node/app/ 是程序本体，~/.local/bin/hub-node 是命令入口。
+# 布局：~/.hub-node/ 是配置目录，~/.hub-node/app/ 是程序本体，
+#       ~/.local/bin/hub-node 是命令入口。
+# 不在这里种 node.json / commands.json：example 里的占位符和 lan-exec
+# 会让随后的 hub-node setup --yes 拒绝覆盖，或让 doctor 因 carrier 离线失败。
+# 正式配置（含绝对路径 echo 种子）由 hub-node setup 生成。
 # 重跑本脚本 = 更新程序（git pull 或重新下载），已有配置不覆盖。
 set -eu
 
@@ -36,15 +39,8 @@ fi
 cd "$APP"
 npm install --omit=dev --no-audit --no-fund
 
-# 种子配置：只在缺失时生成，绝不覆盖已有配置
-if [ ! -f "$HOME_DIR/node.json" ]; then
-  sed "s#\"appEnv\": \"[^\"]*\"#\"appEnv\": \"$HOME_DIR/app.env\"#" "$APP/config/node.example.json" > "$HOME_DIR/node.json"
-  echo "已生成示例配置：$HOME_DIR/node.json（需填入你的 Base token 与表 ID）"
-fi
-if [ ! -f "$HOME_DIR/commands.json" ]; then
-  cp "$APP/config/commands.example.json" "$HOME_DIR/commands.json"
-  echo "已生成示例能力表：$HOME_DIR/commands.json"
-fi
+# 凭据文件可以先摆一个空壳（600）；node.json / commands.json 留给 setup，
+# 避免把带占位符和 lan-exec 的 example 当成正式配置。
 if [ ! -f "$HOME_DIR/app.env" ]; then
   printf 'APP_ID=\nAPP_SECRET=\n' > "$HOME_DIR/app.env"
   chmod 600 "$HOME_DIR/app.env"

@@ -1,8 +1,9 @@
 // setup —— 一键配置向导：把「装节点」的门槛压到一条命令。
 // 做完的事：确认 lark-cli 在位（不在则用 npm 装）；复用 lark-cli 已配置的
-// 飞书应用（凭据只在本机流转：配置文件 / macOS 钥匙串 -> 本机 app.env，
-// 绝不打印明文）；向 Base 自动发现六张表的 ID 并写入 node.json；种子能力
-// 只放 echo-test；最后跑 doctor 自检，可选顺带注册开机自启。
+// 飞书应用（凭据只在本机流转：配置文件 / macOS 钥匙串 / 环境变量 /
+// 已有 600 的 app.env -> 本机 app.env，绝不打印明文，也不接受命令行 Secret）；
+// 向 Base 自动发现六张表的 ID 并写入 node.json；种子能力只放绝对路径 echo-test；
+// 最后跑 doctor 自检，可选顺带注册开机自启。
 // 已有 lark-cli 配置是主路径；没有时给出确切的下一步（lark-cli config init）。
 
 import fs from "node:fs";
@@ -30,7 +31,11 @@ function parseFlags(argv) {
     else if (a === "--prefix") f.prefix = argv[++i];
     else if (a === "--desc") f.desc = argv[++i];
     else if (a === "--app-id") f.appId = argv[++i];
-    else if (a === "--app-secret") f.appSecret = argv[++i];
+    // 明文参数会留在 ps 和 shell 历史里，只拒绝、不保存值。
+    else if (a === "--app-secret" || a.startsWith("--app-secret=")) {
+      f.rejectAppSecret = true;
+      if (a === "--app-secret") i++;
+    }
   }
   return f;
 }
@@ -113,8 +118,100 @@ function extractBaseToken(input) {
   return /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
 }
 
+// install.sh 曾经把 example 直接种成 node.json。这些值仍是占位符时，
+// 首装还没完成：--yes 应覆盖而不是退出 4，交互默认 Y。
+// app_token 是旧示例字段（正式配置用 baseToken），出现 REPLACE 或 bascn 即占位。
+// baseToken / 表 ID 认本仓库 example 的尖括号、<REPLACE>，以及 bascnxxxx 这种填充。
+function isPlaceholderToken(v) {
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  if (!s) return false;
+  if (s.startsWith("<") || s.includes("REPLACE")) return true;
+  return s === "bascn" || /^bascn[xX._-]+$/.test(s);
+}
+
+function isUnfinishedExample(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  const appToken = raw.app_token ?? raw.appToken;
+  if (typeof appToken === "string" && (appToken.includes("REPLACE") || appToken.includes("bascn"))) return true;
+  const fields = [raw.baseToken];
+  if (raw.tables && typeof raw.tables === "object") fields.push(...Object.values(raw.tables));
+  return fields.some(isPlaceholderToken);
+}
+
+// 只认安装脚本种下的那份示例：相对路径 echo 指错，lan-exec 又会让 doctor 因 carrier 离线失败。
+// 用户事后自己写的能力表不在这里替换。
+function isExampleCommands(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  if (Object.hasOwn(obj, "lan-exec")) return true;
+  return Object.values(obj).some((e) => typeof e?.command === "string" && e.command.includes("../src/executors/echo.mjs"));
+}
+
+function echoSeed(appDir) {
+  return {
+    "echo-test": {
+      command: `node ${JSON.stringify(path.join(appDir, "src", "executors", "echo.mjs"))}`,
+      desc: "链路自检：回显任务参数",
+      mode: "json",
+      name: "回声测试",
+      side_effect: "read",
+    },
+  };
+}
+
+function envSecret() {
+  const hub = (process.env.HUB_APP_SECRET || "").trim();
+  if (hub) return { value: hub, source: "环境变量 HUB_APP_SECRET" };
+  const app = (process.env.APP_SECRET || "").trim();
+  if (app) return { value: app, source: "环境变量 APP_SECRET" };
+  return null;
+}
+
+// 只读权限刚好是 600 的普通文件。更松的权限或符号链接一律不读，避免把 Secret 从暴露的文件载入内存。
+function readLockedAppEnv(configDir) {
+  const p = path.join(configDir, "app.env");
+  let st;
+  try { st = fs.lstatSync(p); } catch { return null; }
+  if (!st.isFile() || st.isSymbolicLink() || (st.mode & 0o777) !== 0o600) return { insecure: true };
+  const kv = {};
+  for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) kv[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return { appId: kv.APP_ID || "", secret: kv.APP_SECRET || "" };
+}
+
+// Node 26 的 promises readline 不再暴露 _writeToOutput，提问期间改写 stdout.write
+// 把按键回显丢掉，只放行换行；finally 恢复，避免 Secret 留在屏幕或后续输出上。
+async function askHidden(rl, prompt) {
+  process.stdout.write(prompt.endsWith(" ") ? prompt : prompt + " ");
+  const original = process.stdout.write;
+  process.stdout.write = function (chunk, encoding, cb) {
+    if (typeof encoding === "function") { cb = encoding; encoding = undefined; }
+    const s = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    if (/[\r\n]/.test(s)) return original.call(this, "\n", typeof cb === "function" ? cb : undefined);
+    if (typeof cb === "function") cb();
+    return true;
+  };
+  try {
+    const raw = await rl.question("");
+    const answer = String(raw || "").trim();
+    try {
+      if (Array.isArray(rl.history)) rl.history = rl.history.filter((h) => String(h).trim() !== answer);
+      if ("historyIndex" in rl) rl.historyIndex = -1;
+    } catch { /* 清不掉历史也不能把 Secret 打进日志 */ }
+    return answer;
+  } finally {
+    process.stdout.write = original;
+  }
+}
+
 export async function runSetup(configDir, argv, appDir) {
   const flags = parseFlags(argv);
+  if (flags.rejectAppSecret) {
+    console.error("  ✗ 已移除 --app-secret（会进入进程列表和 shell 历史）。请改用环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
+    return 2;
+  }
   const interactive = !!process.stdin.isTTY && !flags.yes;
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = async (q, def) => {
@@ -130,12 +227,21 @@ export async function runSetup(configDir, argv, appDir) {
     console.log("hub-node setup —— 一键配置节点");
     console.log(`config dir: ${configDir}`);
 
-    // 1. lark-cli 在位（手工指定 --app-id/--app-secret 时可跳过）
+    // 1. 凭据优先走环境变量或已有 600 app.env。两边都齐时跳过 lark-cli，
+    //    避免非交互首装去装 CLI 或把 Secret 放进命令行。
+    const fromEnv = envSecret();
+    const fileCreds = readLockedAppEnv(configDir);
+    let appId = flags.appId || null;
+    let secret = fromEnv?.value || null;
+    let secretSource = fromEnv?.source || null;
+    if (!secret && fileCreds?.secret) { secret = fileCreds.secret; secretSource = "本机 app.env（600）"; }
+    if (!appId && fileCreds?.appId) appId = fileCreds.appId;
+
     let larkCfg = null;
-    if (!(flags.appId && flags.appSecret)) {
+    if (!(appId && secret)) {
       if (!ensureLarkCli()) return 2;
       larkCfg = readLarkConfig();
-      if (!larkCfg && !flags.appId) {
+      if (!larkCfg && !appId) {
         console.error("  ✗ lark-cli 还没有配置任何飞书应用。");
         console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `hub-node setup`。");
         return 2;
@@ -144,7 +250,6 @@ export async function runSetup(configDir, argv, appDir) {
     }
 
     // 2. 选定应用并解析凭据
-    let appId = flags.appId || null;
     let appEntry = null;
     if (larkCfg) {
       if (appId) appEntry = larkCfg.apps.find((a) => a.appId === appId) || null;
@@ -157,14 +262,20 @@ export async function runSetup(configDir, argv, appDir) {
       if (appEntry) appId = appEntry.appId;
     }
     if (!appId) throw new Error("未能确定应用：请用 --app-id 指定，或先完成 lark-cli 配置。");
-    let secret = flags.appSecret || null;
-    let secretSource = secret ? "命令行参数" : null;
     if (!secret && appEntry) {
       const r = resolveSecret(appEntry);
       if (r) { secret = r.value; secretSource = r.source; }
     }
+    if (!secret && fileCreds?.insecure && !interactive) {
+      console.error("  ✗ app.env 存在但权限不是 600（或是符号链接），已拒绝读取。请 chmod 600 后重跑，或改用环境变量 APP_SECRET / HUB_APP_SECRET。");
+      return 2;
+    }
     if (!secret) {
-      secret = await ask(`粘贴应用 ${appId} 的 App Secret（只写入本机 app.env，权限 600，不会显示在任何日志里）`);
+      if (!interactive) {
+        console.error("  ✗ 非交互模式需要环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
+        return 2;
+      }
+      secret = await askHidden(rl, `粘贴应用 ${appId} 的 App Secret（只写入本机 app.env，权限 600，输入不回显）`);
       secretSource = "手工粘贴";
       if (!secret) { console.error("  ✗ 没有 Secret 无法继续。"); return 2; }
     }
@@ -223,12 +334,27 @@ export async function runSetup(configDir, argv, appDir) {
       if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
     }
 
-    // 5. 写配置（已有 node.json 默认不覆盖）
+    // 5. 写配置。真实 node.json 默认不覆盖；仍是示例占位符则视为首装未完成。
     fs.mkdirSync(configDir, { recursive: true });
     const nodeJsonPath = path.join(configDir, "node.json");
-    if (fs.existsSync(nodeJsonPath) && !flags.force) {
-      const ow = interactive ? await ask("node.json 已存在，覆盖？(y/N)", "N") : "N";
-      if (!/^y/i.test(ow)) { console.error("  ✗ 已保留现有 node.json，未做任何修改（--force 可强制覆盖）。"); return 4; }
+    const nodeExisted = fs.existsSync(nodeJsonPath);
+    let placeholder = false;
+    if (nodeExisted) {
+      try { placeholder = isUnfinishedExample(JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"))); }
+      catch { /* 解析不了就按已有配置保护 */ }
+    }
+    if (nodeExisted && !flags.force) {
+      if (placeholder) {
+        if (interactive) {
+          const ow = await ask("node.json 仍是示例占位符，覆盖并完成首装？(Y/n)", "Y");
+          if (!/^y/i.test(ow)) { console.error("  ✗ 已保留现有 node.json，未做任何修改（--force 可强制覆盖）。"); return 4; }
+        } else {
+          console.log("  · 现有 node.json 仍是示例占位符，视为首装未完成，将覆盖");
+        }
+      } else {
+        const ow = interactive ? await ask("node.json 已存在，覆盖？(y/N)", "N") : "N";
+        if (!/^y/i.test(ow)) { console.error("  ✗ 已保留现有 node.json，未做任何修改（--force 可强制覆盖）。"); return 4; }
+      }
     }
     const appEnvPath = path.join(configDir, "app.env");
     fs.writeFileSync(appEnvPath, `APP_ID=${appId}\nAPP_SECRET=${secret}\n`, { mode: 0o600 });
@@ -246,18 +372,18 @@ export async function runSetup(configDir, argv, appDir) {
     };
     fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
     const cmdPath = path.join(configDir, "commands.json");
-    if (!fs.existsSync(cmdPath)) {
-      const seed = {
-        "echo-test": {
-          command: `node ${JSON.stringify(path.join(appDir, "src", "executors", "echo.mjs"))}`,
-          desc: "链路自检：回显任务参数",
-          mode: "json",
-          name: "回声测试",
-          side_effect: "read",
-        },
-      };
-      fs.writeFileSync(cmdPath, JSON.stringify(seed, null, 1) + "\n");
-      console.log("  ✓ 已写入 app.env（600）、node.json、commands.json（种子能力 echo-test）");
+    const cmdExisted = fs.existsSync(cmdPath);
+    let exampleCmds = false;
+    if (cmdExisted) {
+      try { exampleCmds = isExampleCommands(JSON.parse(fs.readFileSync(cmdPath, "utf8"))); } catch { /* 留着，下面不覆盖 */ }
+    }
+    // 缺文件，或这次是在收尾首装（原来没有正式 node.json）且能力表仍是示例。
+    const replaceCmds = !cmdExisted || (exampleCmds && (!nodeExisted || placeholder));
+    if (replaceCmds) {
+      fs.writeFileSync(cmdPath, JSON.stringify(echoSeed(appDir), null, 1) + "\n");
+      console.log(cmdExisted
+        ? "  ✓ 已写入 app.env（600）、node.json；示例 commands.json（相对路径 echo / lan-exec）已换成绝对路径 echo-test"
+        : "  ✓ 已写入 app.env（600）、node.json、commands.json（种子能力 echo-test，绝对路径）");
     } else {
       console.log("  ✓ 已写入 app.env（600）、node.json；commands.json 已存在，保留原样");
     }

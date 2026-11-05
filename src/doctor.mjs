@@ -8,16 +8,61 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
 import { f1 } from "./bus/feishu.mjs";
-import { pingCarrier } from "./carrier.mjs";
+import { execViaCarrier, pingCarrier } from "./carrier.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
 const info = (msg) => console.log("  · " + msg);
 
-export async function doctor(configDir, appDir) {
+// ping 只证明本机 unix socket 上有 carrier 在听。DESIGN §9 注记④：长驻进程的
+// 局域网裸 TCP 仍可能失败，所以默认报告必须把「socket 在线」和「目标可达」拆开。
+const SOCKET_ONLINE = "carrier socket 在线（局域网目标可达性未验证，可加 --probe <host:port> 探测）";
+
+function parseProbeTarget(raw) {
+  const s = String(raw ?? "").trim();
+  let host, portText;
+  const bracket = s.match(/^\[([^\]]+)\]:(\d+)$/);
+  if (bracket) {
+    host = bracket[1];
+    portText = bracket[2];
+  } else {
+    const i = s.lastIndexOf(":");
+    if (i <= 0 || i === s.length - 1) return null;
+    host = s.slice(0, i);
+    portText = s.slice(i + 1);
+  }
+  if (!host || host.length > 253 || host.startsWith("-")) return null;
+  if (!/^[A-Za-z0-9._:-]+$/.test(host)) return null;
+  if (!/^\d+$/.test(portText)) return null;
+  const port = Number(portText);
+  if (port < 1 || port > 65535) return null;
+  return { host, port };
+}
+
+// 经 carrier 做一次只读 TCP 握手。目标只作为已校验的 argv 传入，不进 shell 元字符。
+async function probeLan(socketPath, host, port) {
+  const script = 'const n=require("net");const h=process.argv[1];const p=Number(process.argv[2]);const s=n.createConnection({host:h,port:p});s.setTimeout(5000,()=>{s.destroy();process.exit(2)});s.on("error",()=>process.exit(1));s.on("connect",()=>{s.end();process.exit(0)})';
+  const command = `node -e '${script}' -- ${host} ${port}`;
+  try {
+    const r = await execViaCarrier(socketPath, { command, timeoutSec: 8 });
+    if (r.code === 0) return { ok: true, detail: "" };
+    const extra = (r.stderr || r.stdout || "").trim().replace(/\s+/g, " ").slice(0, 160);
+    return { ok: false, detail: `退出码 ${r.code ?? "null"}${extra ? " " + extra : ""}` };
+  } catch (e) {
+    return { ok: false, detail: e.message };
+  }
+}
+
+export async function doctor(configDir, appDir, opts = {}) {
   let problems = 0;
+  const probeProvided = opts.probe != null;
+  const probe = probeProvided ? parseProbeTarget(opts.probe) : null;
   console.log(`hub-node doctor ${DAEMON_VERSION}`);
   console.log(`config dir: ${configDir}`);
+  if (probeProvided && !probe) {
+    bad(`--probe 需要 <host:port>（例如 192.168.1.10:22），收到：${opts.probe === "" ? "(空)" : opts.probe}`);
+    problems++;
+  }
 
   // 1. Node 版本（package.json engines: >=20）
   const major = Number(process.versions.node.split(".")[0]);
@@ -89,19 +134,38 @@ export async function doctor(configDir, appDir) {
     info(cfg.events
       ? `唤醒方式：事件订阅（长连接）＋ ${cfg.sweepSec}s 对账兜底`
       : `唤醒方式：轮询 ${cfg.pollSec}s（事件订阅已关）`);
-    // carrier 语境（设计 §9）：有 context=carrier 的能力时才检查
+    // carrier 语境（设计 §9）：有 context=carrier 的能力，或显式 --probe 时才检查。
+    // socket 探活成功只说明本机 carrier 在听，不宣称局域网可达。
     try {
       const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
       const carrierCaps = Object.entries(cmds).filter(([, e]) => e.context === "carrier").map(([k]) => k);
-      if (carrierCaps.length) {
-        if (await pingCarrier(cfg.carrierSocket)) {
-          ok(`carrier 在线（能力 ${carrierCaps.join(", ")} 可用）`);
-        } else {
-          bad(`carrier 离线：能力 ${carrierCaps.join(", ")} 将标离线；请在终端里跑 hub-node host`);
+      if (carrierCaps.length || probe) {
+        const online = await pingCarrier(cfg.carrierSocket);
+        if (!online) {
+          const caps = carrierCaps.length ? `能力 ${carrierCaps.join(", ")} 将标离线；` : "";
+          const via = probe ? `无法探测 ${probe.host}:${probe.port}；` : "";
+          bad(`carrier 离线：${caps}${via}请在终端里跑 hub-node host`);
           problems++;
+        } else if (!probe) {
+          ok(SOCKET_ONLINE);
+          if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
+        } else {
+          ok("carrier socket 在线，经其执行只读 TCP 探测");
+          if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
+          const reached = await probeLan(cfg.carrierSocket, probe.host, probe.port);
+          const target = `${probe.host}:${probe.port}`;
+          if (reached.ok) ok(`局域网目标 ${target} 可达（经 carrier 只读 TCP 探测）`);
+          else {
+            bad(`局域网目标 ${target} 不可达（经 carrier 只读 TCP 探测）${reached.detail ? "：" + reached.detail : ""}`);
+            problems++;
+          }
         }
       }
     } catch { /* commands.json 已在前面报过 */ }
+  }
+  if (probe && !cfg) {
+    bad(`无法探测 ${probe.host}:${probe.port}：配置未加载，不知道 carrier socket 路径`);
+    problems++;
   }
 
   // 7. 自启状态（只报告，不动手）

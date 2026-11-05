@@ -68,7 +68,15 @@ hub-node service    # 注册/卸载开机自启（macOS launchd / Linux systemd 
 - `commands.json`：能力表。键是 Skill_ID，值是命令模板：
   - `mode: "json"` —— 脚本类：stdin 收任务信封，stdout 最后一行输出结果 JSON；
   - `mode: "agent"` —— Agent 类：模板含 `{prompt}`，输出纯文本＋结构化回执块。
-  - 加能力只改这个文件，守护进程每轮自动重读、启动时自动登记能力名片。
+  - 加能力、改能力或删能力只改这个文件。守护进程每轮用文件 mtime 与内容
+    哈希判断它变没变；变了就串行对账 AgentCards：新增或修改的能力更新名片，
+    从文件里删掉的能力把名片 `Dispatchable` 置为 `No`。进程启动后的第一次同步，
+    以及 carrier 在线状态变化时，也会强制校准名片。`registeredCards` 和
+    `carrierAvailability` 只在这一轮写表全部成功之后才更新；写到一半失败就保持
+    上一版缓存，下一轮再补，不会把“没写上”当成“已经同步”。
+  - `commands.json` 临时解析失败时保留上一版有效能力表，并暂停派发新任务
+    （任务留在 `submitted`，不会因为能力表被清空而拒成终态 `rejected`）。
+    文件修好后，下一轮检测到变更会自行恢复派发。
 - 能力分三层：确定性脚本、指定本地 Agent 执行指定 Skill、通用能力
   （Agent＋工具面）——都是命令模板，守护进程是薄壳，不内嵌执行器。
 - 凭据只存节点本地，绝不进总线；节点只发起出站连接，不开监听端口。
@@ -85,7 +93,17 @@ hub-node host     # 前台常驻，保持终端开启；Ctrl-C 退出
 
 守护进程会经本地 unix socket 把这类命令交给 carrier 在终端语境里代跑；
 carrier 不在线时，这些能力在名片上自动标离线、任务明确拒收，绝不静默
-改走直跑。`hub-node doctor` 会报告 carrier 的在线状态。
+改走直跑。在线状态相对上次成功写表发生变化时，会再强制校准一次名片，
+并且仍是写表成功之后才记住新的 `carrierAvailability`。`hub-node doctor`
+默认只报告 carrier socket 是否在线。
+
+[DESIGN.md](DESIGN.md) §9 注记④ 的限定：carrier 必须由用户在拥有局域网路由
+和本地网络权限的交互终端里启动（守护进程只连接、从不拉起它）。socket
+在线只说明本机 carrier 在听，不代表远端局域网目标一定可达。要实测该目标：
+
+```bash
+hub-node doctor --probe <host:port>   # 经在线 carrier 做一次只读 TCP 探测
+```
 
 ## 版本与变更
 
