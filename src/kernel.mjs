@@ -723,13 +723,18 @@ export class Kernel {
         await this.bus.updateRecord(this.T.agentCards, row.record_id, upd);
       }
     }
-    for (const row of rows) {
-      if (f1(row, "Node") !== this.cfg.node) continue;
-      const capId = f1(row, "Cap_ID");
-      if (wanted.has(capId)) continue;
-      if (f1(row, "Dispatchable") === "No") continue;
-      await this.bus.updateRecord(this.T.agentCards, row.record_id, { Dispatchable: "No" });
-      log("capability removed from commands, Dispatchable=No " + capId);
+    // lah reconcile 是一次性对账。协议节点的名片手工登记，命令表经常是空的。
+    // 这种模式不得写 Dispatchable=No，也不得改写命令表里没有的名片。
+    // 常驻 daemon 仍把已从命令表删除的能力停派。
+    if (!this._reconcileOnce) {
+      for (const row of rows) {
+        if (f1(row, "Node") !== this.cfg.node) continue;
+        const capId = f1(row, "Cap_ID");
+        if (wanted.has(capId)) continue;
+        if (f1(row, "Dispatchable") === "No") continue;
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, { Dispatchable: "No" });
+        log("capability removed from commands, Dispatchable=No " + capId);
+      }
     }
     const next = new Map();
     for (const [capId, fields] of wanted) next.set(capId, { ...fields });
@@ -1564,6 +1569,7 @@ export class Kernel {
       log("initial token failed (will retry in loop): " + e.message);
     }
     this._capsReady = false;
+    this._reconcileOnce = once === true;
     if (once) {
       try {
         await this.sweepOnce();
