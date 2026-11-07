@@ -96,6 +96,48 @@ function tryRegisterDriveSubscription(baseToken, appId) {
   }
 }
 
+function checkUserScopes(requiredScopes = ["docs:event:subscribe", "search:docs:read", "docs:permission.member:create"]) {
+  try {
+    const out = run("lark-cli", ["auth", "status", "--json"]);
+    const d = JSON.parse(out);
+    const user = d?.identities?.user;
+    if (!user || user.available !== true) {
+      return { ok: false, missing: requiredScopes };
+    }
+    const rawScope = user.scope || "";
+    const scopes = new Set(typeof rawScope === "string" ? rawScope.split(/\s+/).filter(Boolean) : (Array.isArray(rawScope) ? rawScope : []));
+    const missing = requiredScopes.filter((s) => !scopes.has(s));
+    return { ok: missing.length === 0, missing };
+  } catch (e) {
+    return { ok: false, missing: requiredScopes, error: e.message };
+  }
+}
+
+// 当机器人没有多维表格读写权限时，用当前已登录 User 身份自动把应用添加为该 Base 的协作者
+function tryAddBotCollaborator(baseToken, appId) {
+  if (!baseToken || !appId) return false;
+  try {
+    const out = run("lark-cli", [
+      "drive", "+member-add",
+      "--token", baseToken,
+      "--type", "bitable",
+      "--member-type", "appid",
+      "--member-id", appId,
+      "--perm", "full_access",
+      "--as", "user",
+      "--yes",
+      "--json",
+    ]);
+    const parsed = JSON.parse(out);
+    if (parsed && (parsed.code === 0 || parsed.member || parsed.data || parsed.member_id || !parsed.error)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function larkVersion() {
   try {
     return run("lark-cli", ["--version"]).trim();
@@ -249,7 +291,7 @@ function extractBaseToken(input) {
 }
 
 // 自动探测和发现多维表格 Base（通过 lark-cli / tempBus 搜索及本机已有配置，并验证标准表）
-async function discoverCandidateBases(tempBus) {
+async function discoverCandidateBases(tempBus, appId) {
   const candidates = [];
   const seen = new Set();
 
@@ -378,9 +420,27 @@ async function discoverCandidateBases(tempBus) {
   const verified = [];
   for (const c of candidates) {
     try {
-      const meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
+      let meta;
+      try {
+        meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
+      } catch {
+        if (appId && tryAddBotCollaborator(c.token, appId)) {
+          try {
+            meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
+          } catch { /* 仍然失败 */ }
+        }
+      }
       if (meta?.app?.name) c.name = meta.app.name;
-      const tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
+      let tablesRes;
+      try {
+        tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
+      } catch {
+        if (appId && tryAddBotCollaborator(c.token, appId)) {
+          try {
+            tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
+          } catch { /* 仍然失败 */ }
+        }
+      }
       const names = new Set((tablesRes?.items ?? []).map((t) => t.name));
       const hasAll = REQUIRED_TABLES.every((n) => names.has(n));
       c.hasStandardTables = hasAll;
@@ -644,11 +704,27 @@ export async function runSetup(configDir, argv, appDir) {
     return 2;
   }
   const interactive = !!process.stdin.isTTY && !flags.yes;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let rl = interactive ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null;
+  const runInteractive = (cmd) => {
+    if (rl) {
+      try { rl.close(); } catch {}
+      rl = null;
+    }
+    try {
+      execSync(cmd, { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
+    } finally {
+      if (interactive) {
+        rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      }
+    }
+  };
   const ask = async (q, def) => {
     if (!interactive) {
       if (def !== undefined) return def;
       throw new Error(`非交互模式缺少参数：${q}（请用命令行参数提供，或在终端里交互运行）`);
+    }
+    if (!rl) {
+      rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     }
     const a = (await rl.question(def !== undefined && def !== "" ? `${q} [${def}] ` : `${q} `)).trim();
     return a || def || "";
@@ -687,7 +763,7 @@ export async function runSetup(configDir, argv, appDir) {
         if (interactive) {
           console.log("  · lark-cli 尚未配置应用，正在启动 lark-cli config init 引导配置…");
           try {
-            execSync("lark-cli config init", { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
+            runInteractive("lark-cli config init");
             larkCfg = readLarkConfig();
             if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
           } catch (e) {
@@ -729,18 +805,33 @@ export async function runSetup(configDir, argv, appDir) {
         console.error("  ✗ 非交互模式需要环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
         return 2;
       }
+      if (!rl) {
+        rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      }
       secret = await askHidden(rl, `粘贴应用 ${appId} 的 App Secret（只写入本机 app.env，权限 600，输入不回显）`);
       secretSource = "手工粘贴";
       if (!secret) { console.error("  ✗ 没有 Secret 无法继续。"); return 2; }
     }
     console.log(`  ✓ 应用 ${appId}，凭据来源：${secretSource}`);
 
+    if (interactive && larkCfg) {
+      const userScopeCheck = checkUserScopes(["docs:event:subscribe", "search:docs:read", "docs:permission.member:create"]);
+      if (!userScopeCheck.ok) {
+        console.log("  · 正在通过 lark-cli 授权用户身份（用于自动搜索多维表格、自动添加机器人协作者权限及注册云文档事件订阅）…");
+        try {
+          runInteractive('lark-cli auth login --scope "docs:event:subscribe search:docs:read docs:permission.member:create"');
+        } catch (e) {
+          console.warn("  ! 用户身份授权未完成：" + e.message);
+        }
+      }
+    }
+
     // 3. Base 与表发现
     let defaultBase = null;
     let defaultBaseLabel = "";
     if (!flags.base) {
       const tempBus = new FeishuBus({ appId, appSecret: secret, baseToken: "", tables: {} });
-      const candidates = await discoverCandidateBases(tempBus);
+      const candidates = await discoverCandidateBases(tempBus, appId);
       if (candidates.length === 1) {
         defaultBase = candidates[0].token;
         defaultBaseLabel = candidates[0].name ? `${candidates[0].name}（${candidates[0].token}）` : candidates[0].token;
@@ -777,7 +868,17 @@ export async function runSetup(configDir, argv, appDir) {
       const items = [];
       let page = null;
       for (;;) {
-        const d = await bus.api("GET", `/bitable/v1/apps/${baseToken}/tables?page_size=100` + (page ? `&page_token=${page}` : ""));
+        let d;
+        try {
+          d = await bus.api("GET", `/bitable/v1/apps/${baseToken}/tables?page_size=100` + (page ? `&page_token=${page}` : ""));
+        } catch (firstErr) {
+          if (!/tenant token failed/i.test(firstErr?.message || "") && tryAddBotCollaborator(baseToken, appId)) {
+            console.log(`  ✓ 已自动将应用 ${appId} 添加为该多维表格的「可管理」协作者`);
+            d = await bus.api("GET", `/bitable/v1/apps/${baseToken}/tables?page_size=100` + (page ? `&page_token=${page}` : ""));
+          } else {
+            throw firstErr;
+          }
+        }
         items.push(...(d.items ?? []));
         if (d.has_more) page = d.page_token; else break;
       }
@@ -1039,6 +1140,9 @@ export async function runSetup(configDir, argv, appDir) {
     }
     return 0;
   } finally {
-    rl.close();
+    if (rl) {
+      try { rl.close(); } catch {}
+      rl = null;
+    }
   }
 }
