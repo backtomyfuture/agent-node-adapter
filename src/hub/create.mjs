@@ -1,6 +1,7 @@
 // hub 角色建单。严格按「instruction 消息 → Parts → Tasks 行」写入。
 // Tasks 行是节点的触发信号，必须最后写，否则节点会抢跑、读到空参数。
 // 参数里的执行控制键直接拒绝，规则用 kernel 的 controlKeysIn，写之前就停。
+// 停派或 offline 的名片、对不上的父 Context_ID，也在第一笔写之前拒绝，避免门铃已经发出。
 
 import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -93,6 +94,41 @@ function splitRefs(raw) {
   return ids;
 }
 
+function cardText(card, name) {
+  return String(f1(card, name) ?? "").trim();
+}
+
+// 标准 §10.1：只接受 Dispatchable=Yes 且 Availability 不是 offline。
+// 返回空数组表示可派；否则是写进错误里的原因，调用方据此在写表前拒绝。
+function undispatchableReason(card) {
+  const reasons = [];
+  const dispatchable = String(f1(card, "Dispatchable") ?? "");
+  if (dispatchable !== "Yes") {
+    reasons.push(dispatchable === "No"
+      ? "已停派（Dispatchable=No）"
+      : `不可派（Dispatchable=${dispatchable || "未设置"}，需要 Yes）`);
+  }
+  if (String(f1(card, "Availability") ?? "").toLowerCase() === "offline") {
+    reasons.push("Availability=offline");
+  }
+  return reasons;
+}
+
+function rejectBlocked(cards, lead) {
+  const detail = cards.map((card) => {
+    const skill = cardText(card, "Skill_ID") || "未命名技能";
+    const capId = cardText(card, "Cap_ID");
+    const node = cardText(card, "Node");
+    const tags = [
+      node ? `节点 ${node}` : "",
+      `技能 ${skill}`,
+      capId ? `Cap_ID ${capId}` : "",
+    ].filter(Boolean);
+    return `${tags.join("，")}：${undispatchableReason(card).join("，")}`;
+  }).join("；");
+  throw new Error(`拒绝建单：${lead}：${detail}`);
+}
+
 function titleOf(text, cap, node) {
   const line = String(text ?? "").split("\n").map((item) => item.trim()).find(Boolean);
   const base = line || `${cap} @ ${node}`;
@@ -125,42 +161,71 @@ export async function createTask({
       cards = await bus.listRecords(bus.tables.agentCards);
     } catch { /* 忽略查询错误 */ }
 
+    const skillMatches = (skillId) => cards.filter((card) => {
+      const sameSkill = cardText(card, "Skill_ID") === skillId;
+      const sameNode = node ? cardText(card, "Node") === node : true;
+      return sameSkill && sameNode;
+    });
+    // 先丢掉停派 / offline，再在剩下的里面沿用原顺序取第一张。
+    // 指定了具体名片时不能改挑另一张，所以 Cap_ID 命中坏名片要直接拒绝。
+    const adoptSkill = (matches, lead) => {
+      const usable = matches.filter((card) => undispatchableReason(card).length === 0);
+      if (!usable.length) {
+        rejectBlocked(matches, lead);
+      }
+      const chosen = usable[0];
+      skill = cardText(chosen, "Skill_ID") || skill;
+      if (!node) node = cardText(chosen, "Node");
+    };
+
     // 1. 若提供了 cap：尝试在 AgentCards 中精确查找 Cap_ID 或 Skill_ID
     if (skill) {
-      const matchCap = cards.find((c) => String(f1(c, "Cap_ID") ?? "").trim() === skill);
+      const requested = skill;
+      const matchCap = cards.find((card) => cardText(card, "Cap_ID") === requested);
       if (matchCap) {
-        skill = String(f1(matchCap, "Skill_ID") ?? "").trim() || skill;
-        if (!node) node = String(f1(matchCap, "Node") ?? "").trim();
+        if (undispatchableReason(matchCap).length) {
+          rejectBlocked([matchCap], "指定的能力不可派");
+        }
+        skill = cardText(matchCap, "Skill_ID") || requested;
+        if (!node) node = cardText(matchCap, "Node");
       } else {
-        const matchSkill = cards.find((c) => {
-          const s = String(f1(c, "Skill_ID") ?? "").trim();
-          const n = node ? String(f1(c, "Node") ?? "").trim() === node : true;
-          return n && s === skill;
-        });
-        if (matchSkill) {
-          skill = String(f1(matchSkill, "Skill_ID") ?? "").trim();
-          if (!node) node = String(f1(matchSkill, "Node") ?? "").trim();
-        } else if (skill.startsWith("CAP-")) {
-          // 形如 CAP-<prefix>-<skill>，若未在表里找到，提取末尾 skill
-          const parts = skill.split("-");
+        const matches = skillMatches(requested);
+        if (matches.length) {
+          adoptSkill(matches, "指定的能力不可派");
+        } else if (requested.startsWith("CAP-")) {
+          // 形如 CAP-<prefix>-<skill>，表里没有这张 Cap_ID 时仍把后缀当 Skill_ID。
+          // 不在这里改挑节点：后缀只用来发现「已经命中、且全部不可派」的名片并拒绝。
+          // 否则这条回退会把停派技能照样派出去，绕开 §10.1。
+          const parts = requested.split("-");
           if (parts.length >= 3) {
-            skill = parts.slice(2).join("-");
+            const extracted = parts.slice(2).join("-");
+            const extractedMatches = skillMatches(extracted);
+            const extractedUsable = extractedMatches.filter((card) => undispatchableReason(card).length === 0);
+            if (extractedMatches.length && !extractedUsable.length) {
+              rejectBlocked(extractedMatches, "指定的能力不可派");
+            }
+            skill = extracted;
           }
         }
       }
     }
 
-    // 2. 若未提供 cap 但提供了 to（目标节点）：自动挑选该节点的首选技能
+    // 2. 若未提供 cap 但提供了 to（目标节点）：自动挑选该节点的首选技能。
+    // 先滤掉不可派的名片再打分，否则停派的 agent 会以 200 分压过可用技能。
     if (!skill && node) {
-      const nodeCards = cards.filter((c) => String(f1(c, "Node") ?? "").trim() === node);
-      if (nodeCards.length > 0) {
-        const isOnline = (c) => String(f1(c, "Availability") ?? "").toLowerCase() !== "offline";
-        const priority = (c) => {
-          const sid = String(f1(c, "Skill_ID") ?? "").toLowerCase();
-          const online = isOnline(c) ? 10 : 0;
+      const nodeCards = cards.filter((card) => cardText(card, "Node") === node);
+      const usable = nodeCards.filter((card) => undispatchableReason(card).length === 0);
+      if (nodeCards.length > 0 && !usable.length) {
+        rejectBlocked(nodeCards, `节点 ${node} 没有可派发的能力`);
+      }
+      if (usable.length > 0) {
+        const isOnline = (card) => String(f1(card, "Availability") ?? "").toLowerCase() !== "offline";
+        const priority = (card) => {
+          const sid = String(f1(card, "Skill_ID") ?? "").toLowerCase();
+          const online = isOnline(card) ? 10 : 0;
           let isAgentNode = false;
           try {
-            const meta = JSON.parse(String(f1(c, "Metadata") ?? "{}"));
+            const meta = JSON.parse(String(f1(card, "Metadata") ?? "{}"));
             if (meta?.kind === "agent" || meta?.mode === "inbox") isAgentNode = true;
           } catch {}
           if (sid === "agent" || isAgentNode) return 200 + online;
@@ -168,9 +233,8 @@ export async function createTask({
           if (sid.includes("agent")) return 70 + online;
           return 50 + online;
         };
-        const sorted = nodeCards.slice().sort((a, b) => priority(b) - priority(a));
-        const chosen = sorted[0];
-        skill = String(f1(chosen, "Skill_ID") ?? "").trim();
+        const sorted = usable.slice().sort((a, b) => priority(b) - priority(a));
+        skill = String(f1(sorted[0], "Skill_ID") ?? "").trim();
       }
     }
   }
@@ -190,14 +254,20 @@ export async function createTask({
   const existing = await bus.listRecords(bus.tables.tasks);
   const taken = new Set(existing.map((row) => String(f1(row, "Task_ID") ?? "")).filter(Boolean));
   let hop = 0;
+  let inheritedContext = "";
   if (refs.length) {
     const missing = [];
+    const parentContexts = [];
     for (const id of refs) {
       const parent = existing.find((row) => String(f1(row, "Task_ID") ?? "") === id);
       if (!parent) {
         missing.push(id);
         continue;
       }
+      parentContexts.push({
+        id,
+        contextId: String(f1(parent, "Context_ID") ?? "").trim(),
+      });
       const parentHop = Number(f1(parent, "Hop_Count"));
       const normalized = Number.isFinite(parentHop) && parentHop > 0 ? parentHop : 0;
       if (normalized + 1 > hop) hop = normalized + 1;
@@ -206,9 +276,20 @@ export async function createTask({
     if (hop > HOP_LIMIT) {
       throw new Error(`拒绝建单：派生后 Hop_Count=${hop} 超过上限 ${HOP_LIMIT}`);
     }
+    // 标准 §8.2：没给 --context 才继承。多个父任务会话键不一致就停，
+    // 避免把两件不同的事并进一个新会话。显式 --context 以调用方为准。
+    if (!String(context ?? "").trim()) {
+      const distinct = [...new Set(parentContexts.map((item) => item.contextId))];
+      if (distinct.length > 1) {
+        const detail = parentContexts.map((item) => `${item.id}=${item.contextId || "空"}`).join("，");
+        throw new Error(`拒绝建单：引用的父任务 Context_ID 不一致（${detail}）。请显式指定 --context。`);
+      }
+      inheritedContext = distinct[0] || "";
+    }
   }
   const taskId = freshTaskId(taken, clock);
-  const contextId = String(context ?? "").trim() || `CTX-${taskId.slice("TASK-".length)}`;
+  // 父任务没有 Context_ID 时无从继承，仍生成新会话键，避免把空字符串写入。
+  const contextId = String(context ?? "").trim() || inheritedContext || `CTX-${taskId.slice("TASK-".length)}`;
   const msgId = `MSG-${taskId.slice("TASK-".length)}-01`;
   const createdAt = formatCreatedAt(clock);
   const instruction = String(text ?? "").slice(0, 4000);
