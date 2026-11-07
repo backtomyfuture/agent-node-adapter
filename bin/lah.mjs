@@ -191,18 +191,37 @@ if (cmd === "setup") {
   }
   let release;
   let kernel = null;
+  let hubRuntime = null;
   let signalCode;
   const onSignal = (signal) => {
-    signalCode = signal === "SIGINT" ? 130 : 143;
-    if (kernel) kernel.requestStop();
-    else process.exit(signalCode);
+    const code = signal === "SIGINT" ? 130 : 143;
+    const ts = new Date().toISOString().slice(0, 19);
+    if (signalCode != null) {
+      console.error(`${ts} 再次收到 ${signal}，直接退出`);
+      process.exit(code);
+    }
+    signalCode = code;
+    if (kernel) {
+      console.error(`${ts} 收到 ${signal}，正在停止并标记 offline`);
+      kernel.requestStop();
+      return;
+    }
+    if (hubRuntime) {
+      console.error(`${ts} 收到 ${signal}，hub 关闭长连接并退出`);
+      try { hubRuntime.stop(); }
+      catch (e) { console.error(`${ts} hub 停止失败：` + (e?.message ?? e)); }
+      return;
+    }
+    // hub 路径在 lah 里不持有 Kernel；运行时还没建好时也要能退出。
+    console.error(`${ts} 收到 ${signal}，守护进程退出`);
+    process.exit(code);
   };
   if (role) try {
     const configDir = path.resolve(configDirFrom(rest));
     release = acquireDaemonLock(configDir);
     process.once("exit", release);
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
     let cfg = null;
     try {
       cfg = loadConfig(configDir);
@@ -216,7 +235,8 @@ if (cmd === "setup") {
     }
     if (cfg && role === "hub") {
       const { runHub } = await import("../src/hub/index.mjs");
-      await runHub(cfg);
+      await runHub(cfg, undefined, { onRuntime(rt) { hubRuntime = rt; } });
+      if (signalCode != null) process.exitCode = signalCode;
     } else if (cfg) {
       kernel = new Kernel(cfg);
       await kernel.run();

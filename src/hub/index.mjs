@@ -112,7 +112,7 @@ export async function hubDoctor(configDir) {
   return problems;
 }
 
-export async function runHub(cfg, log = logLine) {
+export async function runHub(cfg, log = logLine, hooks = {}) {
   // 工厂只在 role===hub 时强制长连接。loadConfig 不带这个字段。
   cfg.role = "hub";
   let ownerOpenId = "";
@@ -149,6 +149,7 @@ export async function runHub(cfg, log = logLine) {
     log,
   });
   const runtime = new HubRuntime({ cfg, approval, present, stale, log });
+  if (typeof hooks.onRuntime === "function") hooks.onRuntime(runtime);
   runtime.startWsLoop();
   await runtime.run();
 }
