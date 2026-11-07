@@ -51,7 +51,11 @@ else
 fi
 
 cd "$APP"
-npm install --omit=dev --no-audit --no-fund
+if [ -f package-lock.json ]; then
+  npm ci --omit=dev --no-audit --no-fund
+else
+  npm install --omit=dev --no-audit --no-fund
+fi
 
 chmod +x "$APP/bin/lah.mjs" "$APP/bin/hub-node.mjs"
 mkdir -p "$HOME/.local/bin"
