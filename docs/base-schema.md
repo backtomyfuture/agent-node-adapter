@@ -127,6 +127,7 @@ AgentCard 规范化展开：一行一项能力
 | Cap_Streaming | SingleSelect | 选项：Yes / No |
 | Cap_Push | SingleSelect | 选项：Yes / No |
 | Cap_State_History | SingleSelect | 选项：Yes / No |
+| Metadata | Text | A2A 原生自由字段（JSON）；内核登记写入 {kind, mode}，可为空 |
 
 ## Rules_路由规则
 

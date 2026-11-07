@@ -649,6 +649,12 @@
       "Yes",
       "No"
      ]
+    },
+    {
+     "name": "Metadata",
+     "ui_type": "Text",
+     "type": 1,
+     "primary": false
     }
    ]
   },
