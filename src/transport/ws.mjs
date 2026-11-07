@@ -35,6 +35,7 @@ export class FeishuEventReceiver {
     this._stopped = false;
     this.ws = null;
     this.busSockets = [];
+    this.busLogTimer = null;
     this.usingLocalBus = false;
     this.busConnected = false;
   }
@@ -56,6 +57,10 @@ export class FeishuEventReceiver {
   }
 
   _cleanupBusSockets() {
+    if (this.busLogTimer) {
+      clearInterval(this.busLogTimer);
+      this.busLogTimer = null;
+    }
     for (const sock of this.busSockets) {
       try {
         sock.removeAllListeners();
@@ -73,6 +78,96 @@ export class FeishuEventReceiver {
       }
     }
     return keys;
+  }
+
+  _dispatchBusEvent(key) {
+    if (this._stopped) return;
+    if (key === EVENT_TYPE) {
+      this.handle({ type: EVENT_TYPE, event: { file_token: this.baseToken } });
+      if (typeof this.extraHandlers[EVENT_TYPE] === "function") {
+        Promise.resolve(this.extraHandlers[EVENT_TYPE]({ type: EVENT_TYPE })).catch((e) => {
+          this.log(`event receiver: extraHandler ${EVENT_TYPE} error: ${e?.message ?? e}`);
+        });
+      }
+    } else if (typeof this.extraHandlers[key] === "function") {
+      Promise.resolve(this.extraHandlers[key]({ type: key })).catch((e) => {
+        this.log(`event receiver: extraHandler ${key} error: ${e?.message ?? e}`);
+      });
+    }
+  }
+
+  _startBusLogMonitor(busSockPath, keys) {
+    if (this.busLogTimer) {
+      clearInterval(this.busLogTimer);
+      this.busLogTimer = null;
+    }
+    const logPath = path.join(path.dirname(busSockPath), "bus.log");
+    let offset = 0;
+    try {
+      if (fs.existsSync(logPath)) {
+        offset = fs.statSync(logPath).size;
+      }
+    } catch { /* 忽略 */ }
+
+    const seenMsgIds = new Set();
+    let lastThrottledTime = 0;
+
+    this.busLogTimer = setInterval(() => {
+      if (this._stopped || !this.usingLocalBus) return;
+      try {
+        if (!fs.existsSync(logPath)) return;
+        const st = fs.statSync(logPath);
+        if (st.size < offset) {
+          offset = st.size;
+          return;
+        }
+        if (st.size === offset) return;
+
+        const readLen = st.size - offset;
+        const buf = Buffer.alloc(readLen);
+        const fd = fs.openSync(logPath, "r");
+        try {
+          fs.readSync(fd, buf, 0, readLen, offset);
+        } finally {
+          fs.closeSync(fd);
+        }
+        offset = st.size;
+
+        const chunk = buf.toString("utf8");
+        const lines = chunk.split("\n");
+        for (const line of lines) {
+          if (!line) continue;
+          for (const key of keys) {
+            if (line.includes(key)) {
+              const m = line.match(/message_id:\s*([0-9a-zA-Z-]+)/);
+              if (m) {
+                const msgId = m[1];
+                if (seenMsgIds.has(msgId)) {
+                  continue;
+                }
+                seenMsgIds.add(msgId);
+                if (seenMsgIds.size > 2000) {
+                  const arr = [...seenMsgIds].slice(-1000);
+                  seenMsgIds.clear();
+                  for (const id of arr) seenMsgIds.add(id);
+                }
+                this.log(`event receiver [bus.log]: detected ${key} (msg_id: ${msgId})`);
+                this._dispatchBusEvent(key);
+              } else {
+                const now = Date.now();
+                if (now - lastThrottledTime >= 3000) {
+                  lastThrottledTime = now;
+                  this.log(`event receiver [bus.log]: detected ${key} (throttled)`);
+                  this._dispatchBusEvent(key);
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // 忽略单次读取异常
+      }
+    }, 1000);
   }
 
   _connectLocalBus(busSockPath) {
@@ -96,6 +191,8 @@ export class FeishuEventReceiver {
     };
 
     const keys = this._subscribedKeys();
+    this._startBusLogMonitor(busSockPath, keys);
+
     for (const key of keys) {
       if (this._stopped || fallbackTriggered) break;
       let buf = "";

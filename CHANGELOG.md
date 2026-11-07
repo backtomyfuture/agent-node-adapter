@@ -5,11 +5,18 @@
 
 ## [Unreleased]
 
-- 装机、自检与事件传输优化（复用本机 `lark-cli` 与 Local Event Bus）：
+- 装机、自检与事件传输优化（复用本机 `lark-cli`、Local Event Bus 与本地 Agent 自动扫描）：
   - `install.sh` 移除预先生成空壳 `app.env` 的步骤；
-  - `hub-node setup` 优先检测并复用本机 `lark-cli`（支持新版 `lark-cli` AES-256-GCM 安全存储自动解密、未初始化时自动调起 `lark-cli config init`、自动探测包含 6 张标准表的多维表格 Base 作为默认值、以 `--as user` 注册并校验云文档事件订阅）；
-  - `hub-node doctor` 新增 `lark-cli` 检查、Base 协作者可编辑权限提示、`--as user` 云文档事件订阅状态（`is_subscribe`）自检及本机 `lark-cli` Local Event Bus（`bus.sock`）状态检查；
-  - `src/transport/ws.mjs` 优先复用本机 `~/.lark-cli/events/<appId>/bus.sock` 共享长连接事件流，避免同 AppID 多连接分流丢事件。
+  - `hub-node setup` 优先检测并复用本机 `lark-cli`（支持新版 `lark-cli` AES-256-GCM 安全存储自动解密、未初始化时自动交互式调起 `lark-cli config init`、自动探测包含 6 张标准表的多维表格 Base 作为默认值、以 `--as user` 注册并校验云文档事件订阅）；
+  - `hub-node setup` 新增本地终端 Agent 自动扫描发现：探测常见用户级路径下已安装的 CLI Agent（`claude`, `codex`, `agy`, `gemini`, `amp`, `droid`, `grok`, `hermes`, `cursor-agent`, `opencode`, `aider` 等），自动生成写入带绝对路径与标准安全字段的标准 `commands.json`，并将首选主力 Agent 自动注册为通用的 `ops-agent` 能力模板；
+  - `hub-node setup` 完善唤醒方式三级引导与检查：自动检测飞书开放平台应用线上版本事件订阅配置与云文档订阅状态，支持秒级长连接（ws）、Local Event Bus 复用与 45s 轮询无缝切换；
+  - `hub-node doctor` 新增完整的环境与权限诊断：
+    - `lark-cli` 状态检查；
+    - Base 协作者编辑权限诊断提示；
+    - 飞书开放平台应用线上版本是否订阅 `drive.file.bitable_record_changed_v1` 事件诊断；
+    - `--as user` 云文档事件订阅状态（`is_subscribe`）自检；
+    - 本机 `lark-cli` Local Event Bus（`bus.sock`）在线与复用状态检查；
+  - `src/transport/ws.mjs` 秒级门铃机制增强：优先复用本机 `~/.lark-cli/events/<appId>/bus.sock` 共享长连接事件流；同时实时监控同目录下 `bus.log` 增量，通过正则提取 `drive.file.bitable_record_changed_v1` 并按 `message_id` 去重触发门铃，规避 Go SDK 本地事件总线丢弃非内置 handler 事件的问题，确保秒级事件唤醒 100% 稳定送达。
 
 - 仓库只保留 Node。删除 `hub/` 下的 Python 枢纽（含接收端、呈递扫描、审批发卡、systemd 单元与自愈脚本）和 `schema/generate_schema.py`。Base 结构生成器改为 `schema/generate_schema.mjs`（Node >= 20、全局 `fetch`，不新增依赖）；生成物页眉字符串未改，以便与现有 `schema/base-schema.json`、`docs/base-schema.md` 逐字节一致。
 - `hub-node daemon` 省略 `--role` 时与 doctor、service 一样：先读配置目录 `node.json` 的 `role`，缺省 node。

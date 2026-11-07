@@ -13,7 +13,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { execFileSync, execSync } from "node:child_process";
 import { FeishuBus } from "./bus/feishu.mjs";
-import { doctor } from "./doctor.mjs";
+import { doctor, checkAppEventSubscribed } from "./doctor.mjs";
 import { service } from "./service.mjs";
 
 const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "AgentCards"];
@@ -434,6 +434,157 @@ function echoSeed(appDir) {
   };
 }
 
+function findExecutable(binName) {
+  const extra = [
+    path.join(os.homedir(), ".local/bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    path.join(os.homedir(), ".bun/bin"),
+    path.join(os.homedir(), ".cargo/bin"),
+    path.join(os.homedir(), ".npm-global/bin"),
+    path.join(os.homedir(), ".antigravity/antigravity/bin"),
+    path.join(os.homedir(), ".amp/bin"),
+    path.join(os.homedir(), ".grok/bin"),
+  ];
+  const cur = (process.env.PATH || "").split(path.delimiter);
+  const dirs = [...new Set([...extra, ...cur])];
+
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const fullPath = path.join(dir, binName);
+    try {
+      if (fs.existsSync(fullPath)) {
+        fs.accessSync(fullPath, fs.constants.X_OK);
+        return fullPath;
+      }
+    } catch { /* 不可执行或不存在 */ }
+  }
+  return null;
+}
+
+const KNOWN_AGENTS = [
+  {
+    bin: "claude",
+    skill: "claude-agent",
+    name: "Claude Code Agent",
+    cmdTemplate: (b) => `${b} -p {prompt}`,
+    desc: "以 Claude Code (claude) 为执行主体，带本机终端与文件工具面处理开发、排障与自动化任务",
+  },
+  {
+    bin: "codex",
+    skill: "codex-agent",
+    name: "Codex Agent",
+    cmdTemplate: (b) => `${b} exec {prompt}`,
+    desc: "以 OpenAI Codex CLI (codex) 为执行主体，处理代码编写、终端排障与自动化任务",
+  },
+  {
+    bin: "agy",
+    skill: "agy-agent",
+    name: "Antigravity Agent",
+    cmdTemplate: (b) => `${b} --print {prompt}`,
+    desc: "以 Antigravity (agy) 为执行主体，带本机终端与工具面处理开放式开发与运维任务",
+  },
+  {
+    bin: "gemini",
+    skill: "gemini-agent",
+    name: "Gemini Agent",
+    cmdTemplate: (b) => `${b} -p {prompt}`,
+    desc: "以 Gemini CLI (gemini) 为执行主体，处理本地分析、脚本与开发任务",
+  },
+  {
+    bin: "amp",
+    skill: "amp-agent",
+    name: "Amp Agent",
+    cmdTemplate: (b) => `${b} -x {prompt}`,
+    desc: "以 Sourcegraph Amp (amp) 为执行主体，处理代码分析、终端操作与工程任务",
+  },
+  {
+    bin: "droid",
+    skill: "droid-agent",
+    name: "Factory Droid Agent",
+    cmdTemplate: (b) => `${b} exec {prompt}`,
+    desc: "以 Factory Droid (droid) 为执行主体，处理本地开发、重构与终端自动化任务",
+  },
+  {
+    bin: "grok",
+    skill: "grok-agent",
+    name: "Grok CLI Agent",
+    cmdTemplate: (b) => `${b} -p {prompt}`,
+    desc: "以本机 Grok CLI (grok) 为执行主体，处理调研、分析与本地工具执行任务",
+  },
+  {
+    bin: "hermes",
+    skill: "hermes-agent",
+    name: "Hermes Agent",
+    cmdTemplate: (b) => `${b} -z {prompt}`,
+    desc: "以 Hermes Agent (hermes) 为执行主体，带本机工具面处理自动化与创作任务",
+  },
+  {
+    bin: "cursor-agent",
+    skill: "cursor-agent",
+    name: "Cursor Agent",
+    cmdTemplate: (b) => `${b} -p {prompt}`,
+    desc: "以 Cursor Agent (cursor-agent) 为执行主体，处理代码编辑与本机终端任务",
+  },
+  {
+    bin: "opencode",
+    skill: "opencode-agent",
+    name: "OpenCode Agent",
+    cmdTemplate: (b) => `${b} run {prompt}`,
+    desc: "以 OpenCode (opencode) 为执行主体，处理本地编程与自动化任务",
+  },
+  {
+    bin: "aider",
+    skill: "aider-agent",
+    name: "Aider Agent",
+    cmdTemplate: (b) => `${b} --message {prompt} --yes`,
+    desc: "以 Aider (aider) 为执行主体，处理本地代码修改任务",
+  },
+];
+
+export function discoverLocalAgents() {
+  const discovered = [];
+  for (const item of KNOWN_AGENTS) {
+    const fullPath = findExecutable(item.bin);
+    if (fullPath) {
+      discovered.push({
+        ...item,
+        path: fullPath,
+        entry: {
+          command: item.cmdTemplate(fullPath),
+          desc: item.desc,
+          mode: "agent",
+          name: item.name,
+          side_effect: "write",
+          approval_class: "approve",
+          timeout_sec: 900,
+        },
+      });
+    }
+  }
+  return discovered;
+}
+
+function buildAgentCommands(selectedAgents, existingCommands = {}) {
+  const result = { ...existingCommands };
+  for (const a of selectedAgents) {
+    result[a.skill] = a.entry;
+  }
+  if (selectedAgents.length > 0 && !result["ops-agent"]) {
+    const primary = selectedAgents[0];
+    result["ops-agent"] = {
+      command: primary.entry.command,
+      desc: `以 ${primary.name} 为执行主体，带本机终端与工具面处理开放式运维与通用任务`,
+      mode: "agent",
+      name: "通用运维代理",
+      side_effect: "write",
+      approval_class: "approve",
+      timeout_sec: 900,
+    };
+  }
+  return result;
+}
+
 function envSecret() {
   const hub = (process.env.HUB_APP_SECRET || "").trim();
   if (hub) return { value: hub, source: "环境变量 HUB_APP_SECRET" };
@@ -697,7 +848,66 @@ export async function runSetup(configDir, argv, appDir) {
       }
     }
 
-    // 5. 写配置。真实 node.json 默认不覆盖；仍是示例占位符则视为首装未完成。
+    // 5. 事件订阅检查与唤醒方式配置
+    console.log("  · 正在检查事件订阅就绪状态…");
+    const appEvRes = await checkAppEventSubscribed(bus, appId, "drive.file.bitable_record_changed_v1");
+    if (appEvRes.ok) {
+      console.log(`  ✓ 应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvRes.onlineVersionId}）`);
+    } else {
+      console.log(`  · 应用线上版本未订阅 drive.file.bitable_record_changed_v1 事件${appEvRes.error ? `（${appEvRes.error}）` : ""}`);
+      console.log(`    若需开启，请在飞书开放平台「事件与回调」添加「多维表格记录变更」并发布版本：https://open.feishu.cn/app/${appId}/event`);
+    }
+
+    const subRes = tryRegisterDriveSubscription(baseToken, appId);
+    if (subRes.success) {
+      console.log("  ✓ 云文档事件订阅已生效（User 身份，is_subscribe=true）");
+    } else {
+      console.log(`  · 云文档事件订阅未生效（${subRes.error || "未订阅"}）`);
+      console.log("    若需开启，请在本机终端执行：");
+      console.log("    1. lark-cli auth login --scope docs:event:subscribe");
+      console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
+    }
+
+    const allEventsReady = appEvRes.ok && subRes.success;
+
+    let events = false;
+    let pollSec = 45;
+    const sweepSec = 900;
+
+    if (role === "hub") {
+      events = true;
+      if (!allEventsReady) {
+        console.log("  · hub 角色强制使用长连接（用于审批卡回调）。未完成订阅时仍可通过长连接接收卡片回调与 15 分钟定时扫表。");
+      }
+    } else {
+      const defaultWake = allEventsReady ? "1" : "2";
+      let wakeChoice = defaultWake;
+      if (interactive) {
+        console.log("\n  选择节点的任务唤醒机制（标准 v3.1 §10.3）：");
+        console.log(`    1. ws${allEventsReady ? "（推荐）" : "（两层事件订阅未全就绪，需补齐后方可秒级唤醒）"}：长连接秒级事件唤醒 ＋ 15分钟对账兜底`);
+        console.log("    2. poll：45秒固定短轮询 ＋ 15分钟对账兜底（无需事件订阅）");
+        console.log("    3. sweep / automation：仅15分钟对账扫表（或依赖飞书多维表格自动化出站通知）");
+        wakeChoice = await ask("选择唤醒方式序号", defaultWake);
+      } else {
+        wakeChoice = defaultWake;
+      }
+
+      if (wakeChoice === "1" || /ws/i.test(wakeChoice)) {
+        events = true;
+        pollSec = 45;
+        console.log("  ✓ 唤醒方式：长连接（ws）秒级事件 ＋ 15分钟对账兜底");
+      } else if (wakeChoice === "3" || /sweep|automation/i.test(wakeChoice)) {
+        events = false;
+        pollSec = sweepSec; // 900s
+        console.log("  ✓ 唤醒方式：仅15分钟低频对账扫表（sweep / automation）");
+      } else {
+        events = false;
+        pollSec = 45;
+        console.log("  ✓ 唤醒方式：45秒短轮询（poll）＋ 15分钟对账兜底");
+      }
+    }
+
+    // 6. 写配置。真实 node.json 默认不覆盖；仍是示例占位符则视为首装未完成。
     fs.mkdirSync(configDir, { recursive: true });
     const nodeJsonPath = path.join(configDir, "node.json");
     const nodeExisted = fs.existsSync(nodeJsonPath);
@@ -738,9 +948,9 @@ export async function runSetup(configDir, argv, appDir) {
       nodeDesc,
       appEnv: appEnvPath,
       baseToken,
-      pollSec: 45,
-      sweepSec: 900,
-      events: false,
+      pollSec,
+      sweepSec,
+      events,
       doorbellFile: null,
       capPrefix: prefix,
       tables,
@@ -748,48 +958,51 @@ export async function runSetup(configDir, argv, appDir) {
     fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
 
     if (role === "node") {
+      const discoveredAgents = discoverLocalAgents();
+      let selectedAgents = [];
+      if (discoveredAgents.length > 0) {
+        console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
+        discoveredAgents.forEach((a, idx) => {
+          console.log(`    ${idx + 1}. [${a.skill}] ${a.name} (${a.path})`);
+        });
+
+        let pick = "all";
+        if (interactive) {
+          pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
+        }
+        const p = String(pick).trim().toLowerCase();
+        if (p === "none" || p === "0") {
+          selectedAgents = [];
+        } else if (p === "all" || p === "" || p === "y" || p === "yes") {
+          selectedAgents = discoveredAgents;
+        } else {
+          const indices = p.split(/[,，\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= discoveredAgents.length);
+          selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
+        }
+      } else {
+        console.log("  · 未扫描到常见本机终端 Agent（仅配置 echo-test 种子能力）");
+      }
+
       const cmdPath = path.join(configDir, "commands.json");
       const cmdExisted = fs.existsSync(cmdPath);
-      let exampleCmds = false;
+      let existingCmds = {};
+      let isExample = false;
       if (cmdExisted) {
-        try { exampleCmds = isExampleCommands(JSON.parse(fs.readFileSync(cmdPath, "utf8"))); } catch { /* 留着，下面不覆盖 */ }
+        try {
+          existingCmds = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
+          isExample = isExampleCommands(existingCmds);
+        } catch { /* 留着，下面不覆盖 */ }
       }
-      // 缺文件，或这次是在收尾首装（原来没有正式 node.json）且能力表仍是示例。
-      const replaceCmds = !cmdExisted || (exampleCmds && (!nodeExisted || placeholder));
-      if (replaceCmds) {
-        fs.writeFileSync(cmdPath, JSON.stringify(echoSeed(appDir), null, 1) + "\n");
-        console.log(cmdExisted
-          ? "  ✓ 已写入 app.env（600）、node.json；示例 commands.json（相对路径 echo / lan-exec）已换成绝对路径 echo-test"
-          : "  ✓ 已写入 app.env（600）、node.json、commands.json（种子能力 echo-test，绝对路径）");
-      } else {
-        console.log("  ✓ 已写入 app.env（600）、node.json；commands.json 已存在，保留原样");
-      }
+
+      // 如果原来是示例命令或不存在，以 echoSeed 为基础，否则保留已有命令
+      const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
+      const finalCmds = buildAgentCommands(selectedAgents, baseCmds);
+
+      fs.writeFileSync(cmdPath, JSON.stringify(finalCmds, null, 1) + "\n");
+      const names = Object.keys(finalCmds);
+      console.log(`  ✓ 已写入 app.env（600）、node.json、commands.json（共 ${names.length} 项能力：${names.join(", ")}）`);
     } else {
       console.log("  ✓ 已写入 app.env（600）、node.json（hub 角色不需要 commands.json）");
-    }
-
-    // 尝试向 Base 注册云文档事件订阅
-    const subRes = tryRegisterDriveSubscription(baseToken, appId);
-    if (subRes.success) {
-      console.log("  ✓ 云文档事件订阅已成功注册到 Base（长连接秒级唤醒已就绪）");
-      if (role === "node") {
-        nodeJson.events = true;
-        fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
-      }
-    } else {
-      if (role === "hub") {
-        console.log(`  · 云文档事件订阅未自动完成（${subRes.error ? subRes.error.slice(0, 100) : "需用户登录"}）`);
-        console.log("    hub 角色强制使用长连接（用于审批卡回调与事件唤醒）。若要接收表变更秒级门铃，请在本机终端执行以下一次性步骤：");
-        console.log("    1. lark-cli auth login --scope docs:event:subscribe");
-        console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
-        console.log("    （未完成订阅时，hub 仍可通过长连接接收审批卡回调与 15 分钟定时扫表）");
-      } else {
-        console.log("  · events 先关（45 秒轮询）；事件订阅需在该机以用户身份向 Base 注册一次，属可选加速项。");
-        console.log("    若需升级为 ws 秒级唤醒，可随时在本机终端执行以下一次性步骤：");
-        console.log("    1. lark-cli auth login --scope docs:event:subscribe");
-        console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
-        console.log(`    3. 将 ${nodeJsonPath} 中的 "events" 改为 true`);
-      }
     }
 
     // 6. 自检

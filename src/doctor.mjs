@@ -67,6 +67,29 @@ function getLarkVersion() {
   }
 }
 
+export async function checkAppEventSubscribed(bus, appId, eventType = "drive.file.bitable_record_changed_v1") {
+  try {
+    const appRes = await bus.api("GET", `/application/v6/applications/${appId}?lang=zh_cn`);
+    const appData = appRes?.app ?? appRes?.data?.app;
+    const onlineVersionId = appData?.online_version_id;
+    if (!onlineVersionId) {
+      return { ok: false, error: "应用未发布线上版本" };
+    }
+    const verRes = await bus.api("GET", `/application/v6/applications/${appId}/app_versions/${onlineVersionId}?lang=zh_cn`);
+    const verData = verRes?.app_version ?? verRes?.data?.app_version;
+    const eventInfos = verData?.event_infos ?? [];
+    const subscribed = eventInfos.some((e) => e.event_type === eventType);
+    return {
+      ok: subscribed,
+      onlineVersionId,
+      subscribed,
+      eventInfos,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 function roleFrom(argv, opts, raw) {
   if (opts?.role === "node" || opts?.role === "hub") return opts.role;
   for (let i = 0; i < argv.length; i++) {
@@ -212,6 +235,15 @@ export async function doctor(configDir, appDir, opts = {}) {
       problems++;
     }
     if (role === "hub" || cfg.events === true) {
+      const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
+      if (appEvCheck.ok) {
+        ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
+      } else {
+        bad(`应用线上已发布版本未订阅事件 drive.file.bitable_record_changed_v1${appEvCheck.error ? `（${appEvCheck.error}）` : ""}`);
+        info(`请打开 https://open.feishu.cn/app/${cfg.bus.appId}/event 添加「多维表格记录变更 (drive.file.bitable_record_changed_v1)」并发布版本，或降级为 45s 轮询模式。`);
+        problems++;
+      }
+
       let isSubscribed = false;
       let checkErr = null;
       try {
@@ -237,6 +269,13 @@ export async function doctor(configDir, appDir, opts = {}) {
         bad(`云文档事件订阅未生效${checkErr ? `（${checkErr}）` : ""}`);
         info(`修复命令：lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
         problems++;
+      }
+    } else {
+      const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
+      if (appEvCheck.ok) {
+        ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
+      } else {
+        info(`应用线上版本未订阅 drive.file.bitable_record_changed_v1（当前为轮询模式已忽略）`);
       }
     }
     const busSockPath = cfg.bus?.appId
