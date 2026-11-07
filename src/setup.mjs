@@ -19,7 +19,7 @@ import { service } from "./service.mjs";
 const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "AgentCards"];
 const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
 
-function parseFlags(argv) {
+export function parseFlags(argv) {
   const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -27,6 +27,9 @@ function parseFlags(argv) {
     else if (a === "--force") f.force = true;
     else if (a === "--service") f.service = true;
     else if (a === "--skip-skill") f.skipSkill = true;
+    else if (a === "--help" || a === "-h") f.help = true;
+    else if (a === "--wake") f.wake = argv[++i];
+    else if (a.startsWith("--wake=")) f.wake = a.slice("--wake=".length);
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
@@ -729,8 +732,40 @@ async function askHidden(rl, prompt) {
   }
 }
 
+
+export function setupHelpText() {
+  return `用法：
+  lah setup [--yes] [--config <dir>] [--role node|hub] [--kind host|agent]
+            [--wake poll|event|sweep] [--skip-skill] [--force]
+            [--node <名>] [--zone <区>] [--prefix <前缀>] [--desc <描述>]
+            [--base <token>] [--app-id <id>] [--owner <open_id>]
+
+  --wake    非交互时选择唤醒方式：event/ws、poll、sweep/automation
+  --help    打印本帮助并退出，不进入向导，也不读取凭据`;
+}
+
+export function normalizeWake(raw) {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "1" || s === "ws" || s === "event") return "1";
+  if (s === "2" || s === "poll") return "2";
+  if (s === "3" || s === "sweep" || s === "automation") return "3";
+  throw new Error(`未知 --wake：${raw}（应为 poll、event/ws 或 sweep/automation）`);
+}
+
 export async function runSetup(configDir, argv, appDir) {
   const flags = parseFlags(argv);
+  if (flags.help) {
+    console.log(setupHelpText());
+    return 0;
+  }
+  let wakeFlag = "";
+  try {
+    wakeFlag = flags.wake ? normalizeWake(flags.wake) : "";
+  } catch (e) {
+    console.error("  ✗ " + e.message);
+    return 2;
+  }
   const role = flags.role || "node";
   if (role !== "node" && role !== "hub") {
     console.error(`  ✗ --role 只能是 node 或 hub，收到：${role}`);
@@ -1042,9 +1077,9 @@ export async function runSetup(configDir, argv, appDir) {
         console.log(`    1. ws${allEventsReady ? "（推荐）" : "（两层事件订阅未全就绪，需补齐后方可秒级唤醒）"}：长连接秒级事件唤醒 ＋ 15分钟对账兜底`);
         console.log("    2. poll：45秒固定短轮询 ＋ 15分钟对账兜底（无需事件订阅）");
         console.log("    3. sweep / automation：仅15分钟对账扫表（或依赖飞书多维表格自动化出站通知）");
-        wakeChoice = await ask("选择唤醒方式序号", defaultWake);
+        wakeChoice = await ask("选择唤醒方式序号", wakeFlag || defaultWake);
       } else {
-        wakeChoice = defaultWake;
+        wakeChoice = wakeFlag || defaultWake;
       }
 
       if (wakeChoice === "1" || /ws/i.test(wakeChoice)) {
