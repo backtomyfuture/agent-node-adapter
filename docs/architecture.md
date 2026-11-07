@@ -21,7 +21,7 @@ flowchart TB
     BUS -->|"ws 长连接事件或 poll 轮询<br/>＋低频对账扫表兜底"| N1
     BUS -->|"同上"| N2
     BUS -->|"webhook 通知<br/>（飞书自动化 POST，只带 ID）"| N3
-    N1["守护进程型节点<br/>hub-node --role node<br/>（家用机、服务器…）"]
+    N1["守护进程型节点<br/>lah daemon --role node<br/>（家用机、服务器…）"]
     N2["守护进程型节点<br/>（工作机…）"]
     N3["协议接入型节点<br/>（云端 Agent 等<br/>无守护进程、按手册盯表）"]
     N1 -->|"本地命令模板"| W1["脚本 / 本地 Agent / 浏览器 / 终端"]
@@ -82,16 +82,15 @@ flowchart TB
 
 ## 角色与传输（标准 v3.1 §10）
 
-- **hub 是逻辑角色，不是独立进程。** 中台只有 node 与 hub 两个角色；
-  实现是 `hub-node daemon --role node|hub`；一台机器要同时承担 hub 与
-  node，起两个守护进程、各用一个配置目录（--config）。
-  hub 角色负责建单（入口 `hub-node task create`，按 instruction 消息
-  → Parts → Tasks 行顺序写；Rules 自动路由仍为计划，目标节点与技能由调用方
-  指定）、发审批卡、回调校验机主、写 auth_decision、写 canceled、结果呈递
-  与陈旧任务告警。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一
-  写方。hub 角色强制 ws 长连接（审批卡回调只能经长连接送达，不允许纯轮询），
-  node 角色可选 ws 或 poll。实现只在 `src/hub/`，由 `hub-node daemon --role hub`
-  跑起来；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。
+- **hub 是逻辑角色，且为 node 的单进程超集。** 中台只有 node 与 hub 两个角色；
+  hub 角色是 node 角色的单进程超集，由 `lah daemon --role node|hub`（CLI 简称 `lah`，向下兼容 `hub-node` 别名）承载。
+  省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。单进程单配置目录即可搞定，无需拆两个进程。
+  `role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责建单（入口 `lah task create`，
+  按 instruction 消息 → Parts → Tasks 行顺序写；Rules 自动路由仍为计划，目标节点与技能由调用方
+  指定）、发审批卡、回调校验机主、写 auth_decision、写 canceled、结果呈递与陈旧任务告警。
+  node 角色从不写 auth_decision 与 canceled，hub 角色是唯一写方。
+  hub 角色强制 ws 长连接（审批卡回调只能经长连接送达，不允许纯轮询），node 角色可选 ws 或 poll。
+  hub 职责逻辑代码在 `src/hub/`。
 - **应用身份。** 默认 hub 一个应用、每台节点一个应用，身份与审计隔离；
   也可共用一个应用简化部署，代价是平台层面分不清 hub 与 node 的写入、
   权限按并集开、单机凭据泄露即可冒写 hub 的决定（标准 §10.2）。

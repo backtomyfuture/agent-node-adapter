@@ -60,7 +60,7 @@
   - `poll`：定时扫表（现有实现，默认 45 秒），用于无法订阅事件时；
   - `webhook`：专指飞书多维表格自动化在 Tasks 行写入后向协议接入型节点的端点 POST，只带 ID 不带正文；发起 POST 的是飞书自动化，本项目进程绝不开监听端口、也不主动推送，守护进程自身只用 ws 或 poll。
 - 三种方式都保留低频对账扫表兜底（默认 15 分钟）。
-- 角色（标准 v3.1 §10.1）：hub 是逻辑角色，不是独立进程。以 `hub-node daemon --role node|hub`（默认 node）承载；一台机器要同时当 hub 与 node，起两个守护进程、各用一个配置目录（--config）。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一写方。
+- 角色（标准 v3.1 §10.1）：hub 是逻辑角色，且为 node 的单进程超集。以 `lah daemon --role node|hub`（CLI 简称 `lah`，向下兼容 `hub-node` 别名；省略 `--role` 时读 `node.json` 的 `role`，缺省 node）承载。单进程、单配置目录即可同时承载干活（读取 `commands.json` 登记能力并认领执行任务）与枢纽职责（全网审批发卡、结果呈递、陈旧告警），无需拆两个进程与配置目录。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一写方。
 
 ## 7. 能力模型与回执约定
 

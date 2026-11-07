@@ -97,11 +97,10 @@ node 角色从不写这两样，hub 角色是唯一写方。
 - 原路分流与落盘：
   - 发起节点（`From_Node === 本节点`）将结果写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / Hook 消费。
   - `Source="hub"` 或 `"cron"`（定时任务）归 `role=hub` 的主节点消费。
-- 去重键：中断态是 (Task_ID, Status_Msg)；终态带上 Status。已呈递键记在 `present_state.json` 与线上 `Tasks.Metadata.presented_keys`。
-- 飞书端保持宁静：不在飞书私聊发送文本结果，飞书端只接收交互式审批卡片。
-- 已发送的键写在配置目录 `present_state.json`（不进仓库，不回写 Tasks）。
-  Tasks.Metadata 里已有的 `presented_keys` 同样视为已呈递。
-- 正文直接发到机主私聊。未配置机主 open_id 则本轮跳过。没有队列文件。
+- 去重键：中断态是 `(Task_ID, Status_Msg)`；终态带上 `Status`。
+- 本地与总线双向记账：已呈递的键保存在本地配置目录的 `present_state.json`（不进仓库），并回写线上 `Tasks.Metadata.presented_keys` 与 `Presented="Yes"`。
+- 飞书端保持宁静：不在飞书私聊发送大段文本结果，飞书端只接收交互式审批卡片（以及可选的 stale 告警）。
+- 装机水位线（Baseline）：初次启动或装机时，若本地呈递状态不存在，自动以线上存量终态或已呈递任务建立基线，避免向本地队列倾倒全部历史已完成任务。
 - 陈旧告警与呈递分开：working 心跳为空、无法解析或早于 20 分钟，以及
   submitted 超过 20 分钟仍无人认领，每种情况每个任务只告警一次，记在
   `stale_state.json`。只通知机主，不替节点回收租约。

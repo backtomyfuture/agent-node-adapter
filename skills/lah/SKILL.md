@@ -82,7 +82,12 @@ lah task show <Task_ID>
 
 ### 5. 独立 Agent 收件箱接单与回执 (`lah inbox`)
 
-当本节点作为独立 Agent（`kind=agent`，如 Muse、Grok Bot 等）运行时，中台将任务投递至本尊收件箱。Agent 本尊通过以下命令与中台闭环交互：
+当本节点作为独立 Agent（`kind=agent`，如 Muse、本地 Agent 会话或常驻 Agent 容器等具有常驻守护进程或定期交互能力的实体）运行时，中台将任务投递至本尊收件箱。Agent 本尊通过以下命令与中台闭环交互：
+
+> [!NOTE]
+> **适用场景界限**：
+> - `kind=agent` + `inbox` **仅适用于有常驻守护进程或能定期/在主循环中调用 `lah inbox` 的 Agent**；
+> - 没有常驻进程的云端外部 Agent（如 Grok Bot）应通过**协议接入型节点（Receive_Mode=automation）＋飞书自动化 webhook** 接入，**不能走 inbox**。因为飞书自动化 webhook 发送至外部 HTTP 端点，**不会读取本机收件箱，收件箱也绝不会被平台 webhook 唤醒**。
 
 #### 5.1 查看与提取新任务 (`lah inbox`)
 ```bash

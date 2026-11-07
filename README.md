@@ -50,7 +50,9 @@ flowchart LR
    ```
    提示式向导支持选择机器类型（1=电脑宿主，2=独立 Agent 本尊）：
    - **`kind: host`（电脑宿主，默认）**：自动发现 lark-cli 应用、自动识别本机已安装的 Agent（Claude Code、Codex、agy、Paseo、Orca 等）并生成 `commands.json`，由守护进程拉起子进程干活；
-   - **`kind: agent`（独立 Agent，如 Muse、Grok Bot）**：本身即为 Agent 实体，setup 绝不扫描 PATH、不注册任何外部 CLI，只注册 `agent` 能力（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳保活，任务由本尊自行接单与处理。
+   - **`kind: agent`（独立 Agent，如 Muse、本地 Agent 会话或常驻 Agent 容器）**：本身即为 Agent 实体，适用于有常驻守护进程或能在主循环中定期调用 `lah inbox` 的 Agent。setup 绝不扫描 PATH、不注册任何外部 CLI，只注册 `agent` 能力（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳保活，由本尊自行接单与处理。
+   > [!IMPORTANT]
+   > **架构分界提示**：`kind=agent` + inbox 仅适用于有常驻进程/能主动调用 `lah inbox` 的 Agent。没有常驻进程的云端外部 Agent（如 Grok Bot）请勿选择 `kind=agent`，而应走「协议接入型节点（`Receive_Mode=automation`）＋飞书自动化 webhook」（见下方接入外部 bot）；因为飞书自动化 webhook 是向外部 HTTP 端点 POST，**不会读取本机收件箱，收件箱也绝不会被平台 webhook 唤醒**。
    自动解析 Base 六表 ID、写入 600 权限的 `app.env` 与 `node.json`，注册云文档事件订阅实现秒级唤醒，并运行 `doctor` 自检。最后可直接确认注册开机自启。
 
 3. **验收运行**：
@@ -124,11 +126,12 @@ flowchart LR
 
 ### 接入外部 bot（如 Grok bot）：飞书自动化 + webhook
 
-对于托管在外部云平台、无法运行 Node 守护进程且无长连接能力的 Agent（如 Grok bot）：
+对于托管在外部云平台、没有常驻进程、无法运行 Node 守护进程且无长连接能力的外部 Agent（如 Grok bot）：
+> **选型界限**：没有常驻进程的外部 Agent 必须走本路径（协议节点 + 飞书自动化 webhook），不能走 `kind=agent` 的收件箱（inbox）模式，因为外部 webhook 无法唤醒本地收件箱文件。
 
 1. **定义与名片**：在 AgentCards 表登记该 bot 的能力与节点标识，`Receive_Mode` 设为 `automation`。
 2. **飞书多维表格自动化**：在 Base 配置自动化流程——当 Tasks 表有新记录写入或状态变更（且 `Target_Node` 为该 bot）时，触发飞书自动化向该 bot 的公网端点发送 HTTP POST。**只发送 ID（Task_ID、状态、Msg_ID），不带任务正文与敏感数据**。
-3. **拉取与回写**：外部 bot 收到 webhook 门铃后，通过飞书 REST API 回查 Messages / Parts 拉取参数；执行完毕后按 A2A 协议写回 Messages、Parts、Runs 并更新 Tasks 状态。外部 bot 须自行设置低频对账（如 15 分钟）兜底扫表。
+3. **拉取与回写**：外部 bot 收到 webhook 门铃后，通过飞书 REST API 回查 Messages / Parts 拉取参数；执行完毕后按 A2A 协议写回 Messages、Parts、Runs 并更新 Tasks 状态。外部 bot 须自行设置低频对账（如 15 分钟）兜底扫表（注意：平台 webhook 与定时对账不能写在同一个飞书自动化内，详见 [协议节点运行手册](docs/protocol-node-runbook.md)）。
 > **红线原则**：本项目守护进程绝不开监听端口、不做端口映射与反向隧道，也不主动向外部节点发起推送（标准 §0 第 3 条、§10.3）。出站通知完全由飞书官方多维表格自动化驱动。详细规范见 [协议节点运行手册](docs/protocol-node-runbook.md)。
 
 ## 节点配置要点

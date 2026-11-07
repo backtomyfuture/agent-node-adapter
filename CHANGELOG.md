@@ -1,9 +1,19 @@
 # Changelog
 
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
-`hub-node --version`；中台标准版本独立编号（现行 v3.1）。
+`hub-node --version`；中台标准版本独立编号（现行 v3.4.1）。
 
 ## [Unreleased]
+
+- 已完成（中台标准 v3.4.1）：
+  - inbox B01–B04：回执字段对齐 Runs schema，产物写入 file Part，ask 以 Outcome=paused 关账，重试复用 inbox-outbox 固定 ID，避免重复写 result；
+  - inbox fail 语义写入标准与实现：Agent 本尊宣告无法完成时不重试，直接 failed + notice，不回 submitted、不计入 Retry_Count；
+  - AgentCards.Metadata 入标准：文本、JSON 字符串，内核登记写入 `{kind, mode}`，可为空；
+  - 建单过滤停派（`Dispatchable=No`）与 `Availability=offline` 的名片，自动挑选与显式 Cap_ID / Skill_ID 都在第一笔写之前拒绝；派生任务继承父 Context_ID，多个父任务不一致时拒绝并要求显式 `--context`（B08、B09）；
+  - setup 修复 pollSec 被硬编码覆盖，并新增 `--skip-skill`（`lah setup` 与 `install.sh`，B10、B11）；
+  - doctor：轮询/协议节点（events 关闭）缺 lark-cli 降为提示；hub 与开启事件订阅的节点仍计为问题（B06）；
+  - 接入文档、协议节点手册与 lah Skill 对齐现行标准（B07）。
+- 已知后续：线上 Base 的 Runs 漂移已清理；schema 生成物（AgentCards.Metadata、不枚举节点名选项）与生成脚本调整待下一轮重新生成。
 
 - host 节点能力表去掉预置占位能力：
   - `lah setup` 不再种入 `echo-test`，也不再用首个 Agent 自动派生重复的 `ops-agent`；host 节点的能力只来自用户选定的本机 CLI Agent，一个 Agent 对应一项能力。未扫描到任何 Agent 时 `commands.json` 为空，`lah doctor` 给出提示；
