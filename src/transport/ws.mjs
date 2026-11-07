@@ -22,6 +22,28 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 const EVENT_TYPE = "drive.file.bitable_record_changed_v1";
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
+export function normalizeBusEvent(msg) {
+  if (!msg || typeof msg !== "object") return { _source: "bus" };
+  const rawPayload = msg.payload ?? msg.event ?? msg.data ?? msg;
+  const payload = (rawPayload && typeof rawPayload === "object") ? rawPayload : {};
+  const rawInner = payload.event ?? payload.data?.event ?? payload;
+  const innerEvent = (rawInner && typeof rawInner === "object") ? { ...rawInner } : {};
+  const header = payload.header ?? msg.header ?? innerEvent.header ?? {};
+
+  const operator = innerEvent.operator ?? payload.operator ?? msg.operator;
+  if (operator && !innerEvent.operator) innerEvent.operator = operator;
+  const action = innerEvent.action ?? payload.action ?? msg.action;
+  if (action && !innerEvent.action) innerEvent.action = action;
+
+  return {
+    ...msg,
+    ...payload,
+    event: innerEvent,
+    header,
+    _source: "bus",
+  };
+}
+
 export class FeishuEventReceiver {
   constructor({ appId, appSecret, baseToken, doorbellFile, onEvent, onStatus, log, extraHandlers }) {
     this.baseToken = baseToken;
@@ -81,22 +103,16 @@ export class FeishuEventReceiver {
   }
 
   _dispatchBusEvent(key) {
-    if (this._stopped) return;
-    if (key === EVENT_TYPE) {
-      this.handle({ type: EVENT_TYPE, event: { file_token: this.baseToken } });
-      if (typeof this.extraHandlers[EVENT_TYPE] === "function") {
-        Promise.resolve(this.extraHandlers[EVENT_TYPE]({ type: EVENT_TYPE })).catch((e) => {
-          this.log(`event receiver: extraHandler ${EVENT_TYPE} error: ${e?.message ?? e}`);
-        });
-      }
-    } else if (typeof this.extraHandlers[key] === "function") {
-      Promise.resolve(this.extraHandlers[key]({ type: key })).catch((e) => {
-        this.log(`event receiver: extraHandler ${key} error: ${e?.message ?? e}`);
+    if (this._stopped || key !== EVENT_TYPE) return;
+    this.handle({ type: EVENT_TYPE, event: { file_token: this.baseToken }, _source: "bus_log" });
+    if (typeof this.extraHandlers[EVENT_TYPE] === "function") {
+      Promise.resolve(this.extraHandlers[EVENT_TYPE]({ type: EVENT_TYPE, _source: "bus_log" })).catch((e) => {
+        this.log(`event receiver: extraHandler ${EVENT_TYPE} error: ${e?.message ?? e}`);
       });
     }
   }
 
-  _startBusLogMonitor(busSockPath, keys) {
+  _startBusLogMonitor(busSockPath) {
     if (this.busLogTimer) {
       clearInterval(this.busLogTimer);
       this.busLogTimer = null;
@@ -137,29 +153,27 @@ export class FeishuEventReceiver {
         const lines = chunk.split("\n");
         for (const line of lines) {
           if (!line) continue;
-          for (const key of keys) {
-            if (line.includes(key)) {
-              const m = line.match(/message_id:\s*([0-9a-zA-Z-]+)/);
-              if (m) {
-                const msgId = m[1];
-                if (seenMsgIds.has(msgId)) {
-                  continue;
-                }
-                seenMsgIds.add(msgId);
-                if (seenMsgIds.size > 2000) {
-                  const arr = [...seenMsgIds].slice(-1000);
-                  seenMsgIds.clear();
-                  for (const id of arr) seenMsgIds.add(id);
-                }
-                this.log(`event receiver [bus.log]: detected ${key} (msg_id: ${msgId})`);
-                this._dispatchBusEvent(key);
-              } else {
-                const now = Date.now();
-                if (now - lastThrottledTime >= 3000) {
-                  lastThrottledTime = now;
-                  this.log(`event receiver [bus.log]: detected ${key} (throttled)`);
-                  this._dispatchBusEvent(key);
-                }
+          if (line.includes(EVENT_TYPE)) {
+            const m = line.match(/message_id:\s*([0-9a-zA-Z-]+)/);
+            if (m) {
+              const msgId = m[1];
+              if (seenMsgIds.has(msgId)) {
+                continue;
+              }
+              seenMsgIds.add(msgId);
+              if (seenMsgIds.size > 2000) {
+                const arr = [...seenMsgIds].slice(-1000);
+                seenMsgIds.clear();
+                for (const id of arr) seenMsgIds.add(id);
+              }
+              this.log(`event receiver [bus.log]: detected ${EVENT_TYPE} (msg_id: ${msgId})`);
+              this._dispatchBusEvent(EVENT_TYPE);
+            } else {
+              const now = Date.now();
+              if (now - lastThrottledTime >= 3000) {
+                lastThrottledTime = now;
+                this.log(`event receiver [bus.log]: detected ${EVENT_TYPE} (throttled)`);
+                this._dispatchBusEvent(EVENT_TYPE);
               }
             }
           }
@@ -190,9 +204,9 @@ export class FeishuEventReceiver {
       this._startWsClient();
     };
 
-    const keys = this._subscribedKeys();
-    this._startBusLogMonitor(busSockPath, keys);
+    this._startBusLogMonitor(busSockPath);
 
+    const keys = this._subscribedKeys();
     for (const key of keys) {
       if (this._stopped || fallbackTriggered) break;
       let buf = "";
@@ -241,7 +255,7 @@ export class FeishuEventReceiver {
                 this.onStatus?.(true);
               }
             } else if (msg.type === "event") {
-              const payload = msg.payload ?? msg.event ?? msg.data ?? msg;
+              const payload = normalizeBusEvent(msg);
               if (key === EVENT_TYPE) {
                 this.handle(payload);
                 if (typeof this.extraHandlers[EVENT_TYPE] === "function") {
@@ -274,17 +288,26 @@ export class FeishuEventReceiver {
   }
 
   _startWsClient() {
+    this._cleanupBusSockets();
+    this.usingLocalBus = false;
     if (this._stopped || this.ws) return;
     const handles = {};
     for (const [key, fn] of Object.entries(this.extraHandlers)) {
-      if (typeof fn === "function") handles[key] = fn;
-      else this.log(`event receiver: ignore extra handler ${key} (not a function)`);
+      if (typeof fn === "function") {
+        handles[key] = (data) => {
+          const wrapped = (data && typeof data === "object") ? { ...data, _source: "ws" } : data;
+          return fn(wrapped);
+        };
+      } else {
+        this.log(`event receiver: ignore extra handler ${key} (not a function)`);
+      }
     }
     // 门铃后写。同名键先留给上面的用户函数，再包一层，避免 register 的覆盖警告把门铃弄丢。
     const userBitable = handles[EVENT_TYPE];
     handles[EVENT_TYPE] = async (data) => {
-      this.handle(data);
-      if (typeof userBitable === "function") await userBitable(data);
+      const wrapped = (data && typeof data === "object") ? { ...data, _source: "ws" } : data;
+      this.handle(wrapped);
+      if (typeof userBitable === "function") await userBitable(wrapped);
     };
     const dispatcher = new Lark.EventDispatcher({}).register(handles);
     this.ws = new Lark.WSClient({

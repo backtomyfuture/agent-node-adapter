@@ -18,22 +18,66 @@ function dig(obj, name) {
   return obj[name];
 }
 
+export function extractEventId(data) {
+  if (!data || typeof data !== "object") return "";
+  const id = data.event_id
+    ?? data.header?.event_id
+    ?? data.uuid
+    ?? data.open_message_id
+    ?? data.event?.header?.event_id
+    ?? data.payload?.header?.event_id
+    ?? data.payload?.event_id;
+  if (id) return String(id).trim();
+  return "";
+}
+
 export function operatorOpenId(data) {
-  const event = dig(data, "event") ?? data;
-  const operator = dig(event, "operator") ?? dig(data, "operator");
-  const openId = dig(operator, "open_id") ?? dig(operator, "openId");
-  return String(openId ?? "").trim();
+  if (!data || typeof data !== "object") return "";
+  const candidates = [
+    data,
+    data.event,
+    data.payload,
+    data.payload?.event,
+    data.data,
+    data.data?.event,
+  ];
+  for (const c of candidates) {
+    if (!c || typeof c !== "object") continue;
+    const op = c.operator;
+    if (op && typeof op === "object") {
+      const id = op.open_id ?? op.openId ?? op.user_id;
+      if (id) return String(id).trim();
+    } else if (typeof op === "string" && op.trim()) {
+      return op.trim();
+    }
+    const directId = c.open_id ?? c.openId ?? c.user_id;
+    if (directId) return String(directId).trim();
+  }
+  return "";
 }
 
 export function actionValue(data) {
-  const event = dig(data, "event") ?? data;
-  const action = dig(event, "action") ?? dig(data, "action");
-  let value = dig(action, "value");
-  if (typeof value === "string") {
-    try { value = JSON.parse(value); } catch { return {}; }
+  if (!data || typeof data !== "object") return {};
+  const candidates = [
+    data,
+    data.event,
+    data.payload,
+    data.payload?.event,
+    data.data,
+    data.data?.event,
+  ];
+  for (const c of candidates) {
+    if (!c || typeof c !== "object") continue;
+    const act = c.action;
+    let val = act && typeof act === "object" ? act.value : c.value;
+    if (typeof val === "string") {
+      try { val = JSON.parse(val); } catch { /* 继续 */ }
+    }
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      return val;
+    }
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value;
+  return {};
 }
 
 function nowMinute() {
@@ -66,13 +110,26 @@ function bumpMsgId(msgId) {
 }
 
 export class ApprovalService {
-  constructor({ bus, ownerOpenId = "", statePath, log, now = nowMinute }) {
+  constructor({ bus, ownerOpenId = "", statePath, log, now = nowMinute, dedupWindowMs = 60_000 }) {
     this.bus = bus;
     this.ownerOpenId = String(ownerOpenId ?? "").trim();
     this.statePath = statePath;
     this.log = log ?? (() => {});
     this.now = now;
+    this.dedupWindowMs = Number(dedupWindowMs) > 0 ? Number(dedupWindowMs) : 60_000;
     this._tail = Promise.resolve();
+    this._recentEvents = new Map();
+    this._decidedCards = new Map();
+  }
+
+  _purgeExpired(map) {
+    const now = Date.now();
+    for (const [key, val] of map.entries()) {
+      const ts = typeof val === "number" ? val : val?.ts;
+      if (!ts || now - ts > this.dedupWindowMs) {
+        map.delete(key);
+      }
+    }
   }
 
   enqueue(fn) {
@@ -161,6 +218,15 @@ export class ApprovalService {
   }
 
   async _decide(data) {
+    this._purgeExpired(this._recentEvents);
+    this._purgeExpired(this._decidedCards);
+
+    const eventId = extractEventId(data);
+    if (eventId && this._recentEvents.has(eventId)) {
+      return toast("info", "该审批已处理。");
+    }
+
+    const src = data?._source || "unknown";
     const owner = String(this.ownerOpenId ?? "").trim();
     const operator = operatorOpenId(data);
     if (!owner) {
@@ -168,7 +234,7 @@ export class ApprovalService {
       return toast("error", "未配置机主，已拒绝。");
     }
     if (operator !== owner) {
-      this.log("WARN card action rejected: operator is not owner");
+      this.log(`WARN card action rejected: operator is not owner (source=${src}, operator_empty=${!operator})`);
       return toast("error", "只有机主可以审批。");
     }
     const value = actionValue(data);
@@ -181,6 +247,16 @@ export class ApprovalService {
       return toast("error", "无法识别的审批决定，已拒绝。");
     }
     if (!cardStatusMsg) return toast("error", "卡片缺少所批的 Status_Msg，已拒绝。");
+
+    const decisionKey = `${recordId}|${cardStatusMsg}|${decision}|${operator}`;
+    if (this._recentEvents.has(decisionKey)) {
+      return toast("info", "该审批已处理。");
+    }
+
+    const cardKey = `${recordId}|${cardStatusMsg}`;
+    if (this._decidedCards.has(cardKey)) {
+      return toast("info", "该审批已处理。");
+    }
 
     const preview = await this.readFresh(recordId, cardTaskId, cardStatusMsg);
     if (!preview.ok) return toast(preview.type, preview.content);
@@ -204,6 +280,14 @@ export class ApprovalService {
       this.log("card action: 决定消息已写入，但任务在落状态前变化，不再改任务行 " + taskId);
       return toast("info", "任务状态已变化或审批已过期，未改任务状态。");
     }
+
+    const now = Date.now();
+    this._decidedCards.set(cardKey, { ts: now, decision });
+    this._recentEvents.set(decisionKey, now);
+    if (eventId) {
+      this._recentEvents.set(eventId, now);
+    }
+
     if (decision === "approve") {
       // 保留 Status_Msg，节点认领前用它核对 In_Reply_To。清 Presented，这一态才能再呈递。
       await this.bus.updateRecord(this.bus.tables.tasks, recordId, {

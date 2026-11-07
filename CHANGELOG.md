@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+- 修复审批卡回调重复处理与空壳载荷误报问题：
+  - `src/transport/ws.mjs`：
+    - 禁止 `bus.log` 文本监控触发 `extraHandlers`：`_startBusLogMonitor` 与 `_dispatchBusEvent` 仅用于 `EVENT_TYPE`（多维表格变更门铃唤醒），彻底杜绝从纯文本日志产生无载荷空壳事件分发给 `card.action.trigger`；
+    - 启动直连 `_startWsClient()` 前强制清理本地总线 socket 并置 `usingLocalBus = false`，保证直连 WS 与本地总线严格互斥；
+    - 新增 `normalizeBusEvent()` 归一化本地总线帧，提取标准 `{ event: { operator, action }, header, _source: "bus" }` 结构，并在直连 WS 载荷中注入 `_source: "ws"`；
+  - `src/hub/approval.mjs`：
+    - 增强 `operatorOpenId()` 与 `actionValue()` 提取兼容性，支持多层嵌套及顶层属性提取；
+    - 新增短窗口去重缓存（60s TTL）：提取 `event_id` / `decisionKey` 与已裁决卡片 `_decidedCards`，对重试投递与刚裁决卡片的重复点击静默 no-op 返回已处理，不再重复落库与误报 `stale card`；
+    - 完善非机主与空载荷拒绝日志格式，输出 `source` 与 `operator_empty` 诊断字段（不打印明文 open_id）；真正过期或已被篡改的任务依然严格由 `readFresh()` 拦截并记录警告。
+
 - CLI 重命名为 `lah` 与 Hub 角色单进程超集升级：
   - 推出统一 CLI 主入口 `lah`（`lark-a2a-hub` 缩写，`bin/lah.mjs`），`bin/hub-node.mjs` 保留并重导出 `lah` 作为 100% 向下兼容别名；`package.json` 与 `install.sh` 同步更新支持 `lah` 与 `hub-node` 双命令软链接；
   - `hub` 角色升级为 `node` 角色的**单进程超集**：
