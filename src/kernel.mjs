@@ -1495,12 +1495,25 @@ export class Kernel {
 
   startEventReceiver() {
     this.waker?.stop();
-    this.waker = createWaker(this.cfg, {
+    this.waker = null;
+    // 停止请求可能落在创建唤醒器之前。这时不要再打开长连接。
+    if (this._stopping) return;
+    const waker = createWaker(this.cfg, {
       extraHandlers: this.cfg.extraHandlers ?? {},
       onStatus: (up) => { this._wsUp = up; },
       log,
     });
-    this.waker.start(() => { this._wakeFlag = true; });
+    this.waker = waker;
+    if (this._stopping) {
+      waker.stop?.();
+      this.waker = null;
+      return;
+    }
+    waker.start(() => { this._wakeFlag = true; });
+    if (this._stopping) {
+      waker.stop?.();
+      this.waker = null;
+    }
   }
 
   async sweepOnce() {
@@ -1585,6 +1598,10 @@ export class Kernel {
         log("poll error: " + e.message);
         throw e;
       }
+      return;
+    }
+    if (this._stopping) {
+      await this.markOffline();
       return;
     }
     this.startEventReceiver();
