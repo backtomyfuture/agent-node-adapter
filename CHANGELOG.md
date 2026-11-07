@@ -7,7 +7,11 @@
 
 - 容器与无 TTY 环境加固、存量任务呈递基线与通用 Agent 收件箱（中台标准 v3.3）：
   - **无 TTY / 容器与云端环境安装及服务加固**：
-    - `src/service.mjs`：修复 Linux 无 `systemd --user` 会话（如 Docker 容器、Agent VM 报 `No medium found` / 无 D-Bus 会话）时导致 `lah service` 报错崩溃退出；支持探测 user 会话，不可用时自动尝试写入系统级 `/etc/systemd/system/` 服务（root 或免密 sudo），若均无权限则以后台进程脱机拉起守护并输出 systemd 配置说明，返回 0 不阻断 setup；
+    - `src/service.mjs`：
+      - 去掉 `WorkingDirectory=` 外层双引号包裹，避免 systemd 误判为非法相对路径而拒绝启动；
+      - 自动透传当前进程 `PATH` 与网络代理环境变量（`HTTPS_PROXY`、`https_proxy`、`HTTP_PROXY`、`http_proxy`、`ALL_PROXY`、`all_proxy`、`NO_PROXY`、`no_proxy`、`NODE_EXTRA_CA_CERTS`）至 systemd unit 与 macOS LaunchAgent plist，确保代理出站 VM 环境开机自启后直接正常连通飞书；
+      - 增加启动后 `systemctl is-active` 存活核验：在 `enable --now` 后等待 800ms 校验服务状态，若未处于 active 提取 status 摘要打印告警并回退，绝不盲目报启动成功；
+      - 修复 Linux 无 `systemd --user` 会话（如 Docker 容器、Agent VM 报 `No medium found` / 无 D-Bus 会话）时导致 `lah service` 报错崩溃退出；支持探测 user 会话，不可用时自动尝试写入系统级 `/etc/systemd/system/` 服务（root 或免密 sudo），若均无权限则以后台进程脱机拉起守护并输出 systemd 配置说明，返回 0 不阻断 setup；
     - `src/doctor.mjs` 与 `src/setup.mjs`：修复应用缺少 `app.info` 权限时 `checkAppEventSubscribed` 查不了静态事件订阅状态却误报「✗ 未订阅」增加 problems；细化为三态（`subscribed` / `unsubscribed` / `unknown`），`unknown` 只提示跳过静态核对不报 `✗` 不增计数，以实际长连接状态为准；
     - `src/setup.mjs`：
       - 扩充 `readLarkConfig`、`loadMasterKey` 与 `decryptLarkCliSecret` 的目录候选列表（全面纳入 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`~/.config/lark-cli`、`~/.local/share/lark-cli`、`~/.lark-cli`、macOS Library 等）；

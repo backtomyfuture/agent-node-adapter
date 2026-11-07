@@ -36,6 +36,18 @@ function roleOf(configDir, opts = {}) {
   return "node";
 }
 
+const PROXY_ENV_KEYS = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+];
+
 function xmlEscape(s) {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -55,7 +67,41 @@ function run(cmd, args, { ignore = false } = {}) {
   }
 }
 
+async function checkSystemdActive(unit, isUser = true) {
+  await new Promise((res) => setTimeout(res, 800));
+  const args = isUser ? ["--user", "is-active", unit] : ["is-active", unit];
+  try {
+    const out = execFileSync("systemctl", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    if (out === "active" || out === "activating") {
+      return { ok: true, status: out };
+    }
+    return { ok: false, status: out };
+  } catch (e) {
+    const statusOut = (e.stdout || e.stderr || "").toString().trim();
+    let detail = "";
+    try {
+      const statusArgs = isUser ? ["--user", "status", unit, "-n", "10", "--no-pager"] : ["status", unit, "-n", "10", "--no-pager"];
+      detail = execFileSync("systemctl", statusArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    } catch (err) {
+      detail = (err.stdout || err.stderr || err.message || "").toString().trim();
+    }
+    return { ok: false, status: statusOut || "failed", detail };
+  }
+}
+
 export function renderPlist({ label, appBin, configDir, role, logPath }) {
+  const envEntries = [];
+  const defaultPath = `${path.dirname(process.execPath)}:${path.join(os.homedir(), ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
+  const pathVal = process.env.PATH ? `${process.env.PATH}:${defaultPath}` : defaultPath;
+  const uniquePath = [...new Set(pathVal.split(":").filter(Boolean))].join(":");
+  envEntries.push(`<key>PATH</key><string>${xmlEscape(uniquePath)}</string>`);
+
+  for (const k of PROXY_ENV_KEYS) {
+    if (process.env[k]) {
+      envEntries.push(`<key>${xmlEscape(k)}</key><string>${xmlEscape(process.env[k])}</string>`);
+    }
+  }
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -71,7 +117,7 @@ export function renderPlist({ label, appBin, configDir, role, logPath }) {
 </array>
 <key>WorkingDirectory</key><string>${xmlEscape(configDir)}</string>
 <key>EnvironmentVariables</key><dict>
-<key>PATH</key><string>${xmlEscape(path.dirname(process.execPath))}:${xmlEscape(path.join(os.homedir(), ".local", "bin"))}:/usr/local/bin:/usr/bin:/bin</string>
+${envEntries.join("\n")}
 </dict>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
@@ -84,14 +130,31 @@ export function renderPlist({ label, appBin, configDir, role, logPath }) {
 export function renderSystemdUnit({ role, node, appBin, configDir, isSystem = false, user = "", home = "" }) {
   const serviceLines = [
     `ExecStart=${systemdArg(process.execPath)} ${systemdArg(appBin)} daemon --config ${systemdArg(configDir)} --role ${systemdArg(role)}`,
-    `WorkingDirectory=${systemdArg(configDir)}`,
+    `WorkingDirectory=${configDir}`,
     `Restart=on-failure`,
     `RestartSec=5`,
   ];
-  if (isSystem) {
-    if (user) serviceLines.unshift(`User=${user}`);
-    if (home) serviceLines.unshift(`Environment="HOME=${home}"`);
+  if (isSystem && user) {
+    serviceLines.unshift(`User=${user}`);
   }
+
+  const envLines = [];
+  if (isSystem && home) {
+    envLines.push(`Environment=${systemdArg(`HOME=${home}`)}`);
+  }
+  if (process.env.PATH) {
+    envLines.push(`Environment=${systemdArg(`PATH=${process.env.PATH}`)}`);
+  }
+  for (const k of PROXY_ENV_KEYS) {
+    if (process.env[k]) {
+      envLines.push(`Environment=${systemdArg(`${k}=${process.env[k]}`)}`);
+    }
+  }
+
+  if (envLines.length) {
+    serviceLines.splice(isSystem && user ? 1 : 0, 0, ...envLines);
+  }
+
   return `[Unit]
 Description=hub-node daemon (${role}: ${node})
 After=network-online.target
@@ -197,11 +260,22 @@ export async function service(configDir, { remove = false, role: explicitRole } 
         fs.writeFileSync(unitPath, text);
         run("systemctl", ["--user", "daemon-reload"]);
         run("systemctl", ["--user", "enable", "--now", unit]);
-        console.log(`自启已安装并启动：${unit}（role: ${role}）`);
-        console.log(`  单元：${unitPath}`);
-        console.log(`  日志：journalctl --user -u ${unit}`);
-        console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
-        return 0;
+
+        const activeCheck = await checkSystemdActive(unit, true);
+        if (!activeCheck.ok) {
+          console.warn(`  ! systemd 用户服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
+          if (activeCheck.detail) {
+            console.warn(`    ${activeCheck.detail.split("\n").slice(-6).join("\n    ")}`);
+          }
+          run("systemctl", ["--user", "disable", "--now", unit], { ignore: true });
+          hasUserSession = false;
+        } else {
+          console.log(`自启已安装并启动：${unit}（role: ${role}）`);
+          console.log(`  单元：${unitPath}`);
+          console.log(`  日志：journalctl --user -u ${unit}`);
+          console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
+          return 0;
+        }
       } catch (e) {
         hasUserSession = false;
       }
@@ -225,11 +299,25 @@ export async function service(configDir, { remove = false, role: explicitRole } 
           execFileSync("sudo", ["systemctl", "daemon-reload"]);
           execFileSync("sudo", ["systemctl", "enable", "--now", unit]);
         }
-        console.log(`自启已作为系统服务安装并启动：${unit}（role: ${role}）`);
-        console.log(`  单元：${sysUnitPath}`);
-        console.log(`  日志：journalctl -u ${unit}`);
-        console.log(`  卸载：sudo systemctl disable --now ${unit} && sudo rm -f ${sysUnitPath}`);
-        return 0;
+
+        const activeCheck = await checkSystemdActive(unit, false);
+        if (!activeCheck.ok) {
+          console.warn(`  ! systemd 系统服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
+          if (activeCheck.detail) {
+            console.warn(`    ${activeCheck.detail.split("\n").slice(-6).join("\n    ")}`);
+          }
+          if (isRoot) {
+            run("systemctl", ["disable", "--now", unit], { ignore: true });
+          } else {
+            try { execFileSync("sudo", ["systemctl", "disable", "--now", unit], { stdio: "ignore" }); } catch {}
+          }
+        } else {
+          console.log(`自启已作为系统服务安装并启动：${unit}（role: ${role}）`);
+          console.log(`  单元：${sysUnitPath}`);
+          console.log(`  日志：journalctl -u ${unit}`);
+          console.log(`  卸载：sudo systemctl disable --now ${unit} && sudo rm -f ${sysUnitPath}`);
+          return 0;
+        }
       } catch {}
     }
 
