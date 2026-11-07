@@ -47,8 +47,10 @@ webhook 通知可能因网络抖动、自动化重试超时等出现丢失，因
 > [!IMPORTANT]
 > **重要配置注意**：飞书多维表格自动化中，「Tasks 新增记录」这类事件触发器与「定时触发（每 15 分钟）」**不能写在同一个自动化流程里**。
 
+收到 webhook 门铃后，以及 15 分钟对账时，官方入口是 `lah reconcile`（可写 `lah reconcile --once`）。它复用内核 `sweepOnce()`：回表认领、心跳、入箱或执行、校准名片，然后退出，不长驻。节点 `pollSec` ≥ `sweepSec`（setup `--wake sweep`）时，名片 `Receive_Mode` 登记为 `automation`。
+
 对账必须通过独立例行配置：
-- **方案 A（节点端定时例行，推荐）**：协议节点在其运行环境配置独立的定时任务（如 cron 每 15 分钟执行一次），主动通过 REST API 拉取 `Target_Node=本节点` 且 `Status=submitted` 的存量任务，以及 `Status=input-required` 下已追加 `answer` 消息的任务，补齐漏唤醒的单；
+- **方案 A（节点端定时例行，推荐）**：协议节点在其运行环境配置独立的定时任务（如 cron 每 15 分钟执行一次 `lah reconcile`），主动回表拉取 `Target_Node=本节点` 且 `Status=submitted` 的存量任务，以及 `Status=input-required` 下已追加 `answer` 消息的任务，补齐漏唤醒的单；
 - **方案 B（飞书端独立自动化）**：在 Base 另建一条独立的飞书自动化流程，触发器设为「定时触发（间隔 15 分钟）」，动作为「查找记录」匹配本节点未完成任务，再向协议节点的专用对账 webhook 端点 POST 任务 ID 列表。
 
 ### 3. 盯表矩阵

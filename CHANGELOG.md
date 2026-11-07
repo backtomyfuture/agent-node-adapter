@@ -13,7 +13,16 @@
   - setup 修复 pollSec 被硬编码覆盖，并新增 `--skip-skill`（`lah setup` 与 `install.sh`，B10、B11）；
   - doctor：轮询/协议节点（events 关闭）缺 lark-cli 降为提示；hub 与开启事件订阅的节点仍计为问题（B06）；
   - 接入文档、协议节点手册与 lah Skill 对齐现行标准（B07）。
-- 已知后续：线上 Base 的 Runs 漂移已清理；schema 生成物（AgentCards.Metadata、不枚举节点名选项）与生成脚本调整待下一轮重新生成。
+  - 发布 schema 补齐 AgentCards.Metadata（B05）；
+  - setup 新增非交互 `--wake poll|event|sweep`（B10）；
+  - 新增只读 `lah inventory` 盘点名片与任务，不做自动清库或迁移（B11）；
+  - 低频扫表（pollSec ≥ sweepSec）时名片登记 Receive_Mode=automation；新增 `lah reconcile` 单次回表后退出，供 webhook / 15 分钟对账使用（B12）；
+  - 重配时覆盖已有 Node_Desc，避免留下错误模式描述（B13）；
+  - 常驻 daemon 收到 SIGINT/SIGTERM 时先把本节点名片 Availability 置为 offline 再退出；`lah reconcile` 单次退出不离线（B14）；
+  - `lah setup --help` 打印帮助并退出，不进向导、不读凭据（B15）；
+  - 锁文件补齐 `lah` bin 映射；`install.sh` 在有 package-lock.json 时改用 `npm ci`（B16）；
+  - 内核提交 result/notice 时 To_Node 走 initiatorOf（首条 instruction.From_Node，否则 Source，否则 hub），不再写死 hub。
+- 已知后续：线上 Base 的 Runs 漂移已清理；节点名单选项枚举的生成脚本调整仍待下一轮。审批卡批准后置回 submitted 是现行协议，本轮未改状态机。
 
 - host 节点能力表去掉预置占位能力：
   - `lah setup` 不再种入 `echo-test`，也不再用首个 Agent 自动派生重复的 `ops-agent`；host 节点的能力只来自用户选定的本机 CLI Agent，一个 Agent 对应一项能力。未扫描到任何 Agent 时 `commands.json` 为空，`lah doctor` 给出提示；
