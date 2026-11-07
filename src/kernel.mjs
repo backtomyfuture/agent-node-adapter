@@ -157,6 +157,13 @@ export function loadConfig(configDir) {
   };
 }
 
+
+export function receiveModeOf(cfg) {
+  if (cfg?.events || cfg?.doorbellFile) return "event";
+  if ((cfg?.pollSec ?? 45) >= (cfg?.sweepSec ?? 900)) return "automation";
+  return "poll";
+}
+
 export class Kernel {
   constructor(cfg) {
     this.cfg = cfg;
@@ -659,7 +666,7 @@ export class Kernel {
   }
 
   desiredCard(skill, entry, carrierUp) {
-    const receiveMode = this.cfg.events || this.cfg.doorbellFile ? "event" : "poll";
+    const receiveMode = receiveModeOf(this.cfg);
     const isInbox = entry?.mode === "inbox";
     const desc = isInbox ? (entry?.desc || `${this.cfg.node} 独立 Agent 本尊`) : (entry?.desc ?? "");
     return {
@@ -709,7 +716,9 @@ export class Kernel {
         if (k === "Cap_ID") continue;
         if (String(f1(row, k) ?? "") !== String(v ?? "")) upd[k] = v;
       }
-      if (this.cfg.nodeDesc && !f1(row, "Node_Desc")) upd.Node_Desc = this.cfg.nodeDesc;
+      if (this.cfg.nodeDesc && String(f1(row, "Node_Desc") ?? "") !== String(this.cfg.nodeDesc)) {
+        upd.Node_Desc = this.cfg.nodeDesc;
+      }
       if (Object.keys(upd).length) {
         await this.bus.updateRecord(this.T.agentCards, row.record_id, upd);
       }
@@ -1032,7 +1041,7 @@ export class Kernel {
     if (!(await this.findBy(this.T.messages, "Msg_ID", box.msgId))) {
       const fields = {
         Msg_ID: box.msgId, Task_ID: box.taskId, Context_ID: f1(task, "Context_ID"),
-        From_Node: this.cfg.node, To_Node: "hub", Role: "agent",
+        From_Node: this.cfg.node, To_Node: await this.initiatorOf(task), Role: "agent",
         Kind: failed ? "notice" : "result",
         Artifact_Ref: box.artId || "", In_Reply_To: "", Created_At: nowShort(),
       };
@@ -1528,24 +1537,56 @@ export class Kernel {
     }
   }
 
-  async run() {
-    log(`node daemon ${DAEMON_VERSION} starting on ${this.cfg.node}`);
+  requestStop() {
+    this._stopping = true;
+    this._wakeFlag = true;
+    this.waker?.stop();
+  }
+
+  async markOffline() {
+    try {
+      const rows = await this.bus.listRecords(this.T.agentCards);
+      for (const row of rows) {
+        if (f1(row, "Node") !== this.cfg.node) continue;
+        if (String(f1(row, "Availability") ?? "").toLowerCase() === "offline") continue;
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, { Availability: "offline" });
+        log("card offline on shutdown " + f1(row, "Cap_ID"));
+      }
+    } catch (e) {
+      log("mark offline failed: " + (e?.message ?? e));
+    }
+  }
+
+  async run({ once = false } = {}) {
+    log(`node daemon ${DAEMON_VERSION} starting on ${this.cfg.node}${once ? " (once)" : ""}`);
     // 常驻进程的第一原则：启动期任何一步失败都不许死，进主循环重试。
     try { await this.bus.tenantToken(); } catch (e) {
       log("initial token failed (will retry in loop): " + e.message);
     }
-    this.startEventReceiver();
     this._capsReady = false;
+    if (once) {
+      try {
+        await this.sweepOnce();
+      } catch (e) {
+        log("poll error: " + e.message);
+        throw e;
+      }
+      return;
+    }
+    this.startEventReceiver();
     for (;;) {
       // 唤醒标志在扫表前消费：本次扫表会看到最新状态，扫表之后
       // 再到的事件由 waitWake 立刻响应，不会被误清。
+      if (this._stopping) break;
       this._wakeFlag = false;
       try {
         await this.sweepOnce();
       } catch (e) {
         log("poll error: " + e.message);
       }
+      if (this._stopping) break;
       await this.waitWake();
     }
+    await this.markOffline();
   }
 }
