@@ -96,7 +96,7 @@ function tryRegisterDriveSubscription(baseToken, appId) {
   }
 }
 
-function checkUserScopes(requiredScopes = ["docs:event:subscribe", "search:docs:read", "docs:permission.member:create"]) {
+function checkUserScopes(requiredScopes = ["docs:event:subscribe", "docs:permission.member:create"]) {
   try {
     const out = run("lark-cli", ["auth", "status", "--json"]);
     const d = JSON.parse(out);
@@ -616,7 +616,7 @@ export function discoverLocalAgents() {
           mode: "agent",
           name: item.name,
           side_effect: "write",
-          approval_class: "approve",
+          approval_class: "auto",
           timeout_sec: 900,
         },
       });
@@ -638,7 +638,7 @@ function buildAgentCommands(selectedAgents, existingCommands = {}) {
       mode: "agent",
       name: "通用运维代理",
       side_effect: "write",
-      approval_class: "approve",
+      approval_class: "auto",
       timeout_sec: 900,
     };
   }
@@ -815,11 +815,11 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(`  ✓ 应用 ${appId}，凭据来源：${secretSource}`);
 
     if (interactive && larkCfg) {
-      const userScopeCheck = checkUserScopes(["docs:event:subscribe", "search:docs:read", "docs:permission.member:create"]);
+      const userScopeCheck = checkUserScopes(["docs:event:subscribe", "docs:permission.member:create"]);
       if (!userScopeCheck.ok) {
         console.log("  · 正在通过 lark-cli 授权用户身份（用于自动搜索多维表格、自动添加机器人协作者权限及注册云文档事件订阅）…");
         try {
-          runInteractive('lark-cli auth login --scope "docs:event:subscribe search:docs:read docs:permission.member:create"');
+          runInteractive('lark-cli auth login --scope "docs:event:subscribe docs:permission.member:create"');
         } catch (e) {
           console.warn("  ! 用户身份授权未完成：" + e.message);
         }

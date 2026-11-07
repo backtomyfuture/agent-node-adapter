@@ -10,9 +10,9 @@
   - `hub-node setup` 优先检测并复用本机 `lark-cli`（支持新版 `lark-cli` AES-256-GCM 安全存储自动解密、未初始化时自动交互式调起 `lark-cli config init`、自动探测包含 6 张标准表的多维表格 Base 作为默认值、以 `--as user` 注册并校验云文档事件订阅）；
   - `hub-node setup` 交互体验与从零装机加固：
     - 封装 `runInteractive()`，在调起 `lark-cli config init` 或 `lark-cli auth login` 时动态关闭并重建 Node `readline` 接口，解决子进程终端交互争抢 `process.stdin` 导致无法输入的问题；
-    - 自动检测 User 登录态及必备 Scope（`docs:event:subscribe`、`search:docs:read`、`docs:permission.member:create`），缺少时自动引导授权；
+    - 自动检测 User 登录态及必备 Scope（`docs:event:subscribe`、`docs:permission.member:create`），缺少时自动引导授权（移除需企业租户管理员审批的 `search:docs:read`）；
     - 自动化权限打通：在 Base 探测及拉取表列表遇到权限问题时，自动以 User 身份调用 `lark-cli drive +member-add` 将应用添加为多维表格「可管理（full_access）」协作者，实现无需手动在飞书界面点击添加协作者的一键闭环；
-  - `hub-node setup` 新增本地终端 Agent 自动扫描发现：探测常见用户级路径下已安装的 CLI Agent（`claude`, `codex`, `agy`, `gemini`, `amp`, `droid`, `grok`, `hermes`, `cursor-agent`, `opencode`, `aider` 等），自动生成写入带绝对路径与标准安全字段的标准 `commands.json`，并将首选主力 Agent 自动注册为通用的 `ops-agent` 能力模板；
+  - `hub-node setup` 新增本地终端 Agent 自动扫描发现：探测常见用户级路径下已安装的 CLI Agent（`claude`, `codex`, `agy`, `gemini`, `amp`, `droid`, `grok`, `hermes`, `cursor-agent`, `opencode`, `aider` 等），自动生成写入带绝对路径与标准安全字段的标准 `commands.json`（默认 `approval_class: "auto"`，由任务行 `Approval_Class` 控制是否需机主审批），并将首选主力 Agent 自动注册为通用的 `ops-agent` 能力模板；
   - `hub-node setup` 完善唤醒方式三级引导与检查：自动检测飞书开放平台应用线上版本事件订阅配置与云文档订阅状态，支持秒级长连接（ws）、Local Event Bus 复用与 45s 轮询无缝切换；
   - `hub-node doctor` 新增完整的环境与权限诊断：
     - `lark-cli` 状态检查；
