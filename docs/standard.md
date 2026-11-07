@@ -11,7 +11,7 @@
 3. **只出不进**：节点与 hub 角色只发起出站连接（飞书 API、长连接），不开监听端口、不做端口映射与反向隧道、不暴露所在局域网。本标准中的 webhook 只指出站通知：由飞书多维表格自动化在 Tasks 行写入后向协议接入型节点自有平台托管的端点 POST；本项目任何进程都不开监听端口、也不主动推送（§10.3）。
 4. **机主审批红线**：涉及对外发消息、删改数据、花钱、提交表单、改权限的动作，最终只认机主本人在聊天里的亲口确认；表中标记仅作参考（auth-required 流程见 §8.3）。
 5. **凭据与敏感原文不入表、不进载荷**；结果回传统一「摘要＋指针」。
-6. **hub 是逻辑角色**：枢纽（hub）是一组职责，不是独立进程或独立实现。由 `hub-node daemon --role node|hub` 承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。一台机器要同时承担两个角色，起两个守护进程、各用一个配置目录（--config）。凡本标准归给枢纽的约束，由承担 hub 角色的一方遵守（§10.1）。
+6. **hub 是 node 的单进程超集**：枢纽（hub）是一组逻辑职责，也是普通执行节点（node）的超集——单进程、单配置目录即可同时承载，无需再拆两个进程。由 `lah daemon --role node|hub`（兼容 `hub-node`）承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json`、登记 `AgentCards`、认领并执行指派给自己的任务（含定时任务），又强制开启长连接（`ws`）并额外承担全网 `auth-required` 审批发卡与 `card.action.trigger` 回调处理、结果呈递、以及 `stale` 超时告警。凡本标准归给枢纽的约束，由承担 hub 角色的一方遵守（§10.1）。
 
 ## 1. 对象总览（七表，形态 B：A2A 主干＋本地扩展列）
 
@@ -207,16 +207,17 @@
 
 ## 10. 附则：角色与传输（v3.1，表结构不变）
 
-### 10.1 hub 是逻辑角色
+### 10.1 hub 是逻辑角色，且为 node 的单进程超集
 
-- 中台只有两个逻辑角色：**node**（认领、执行、回执，可做的状态迁移见 §2、§4、§8）与 **hub**（枢纽）。本标准中凡写「枢纽」「hub」处，均指承担 hub 角色的一方；hub 不是独立进程，也不是某一份独立实现。
-- 实现是 Node 版 `hub-node daemon --role node|hub`。省略 `--role` 时读该进程配置目录里 `node.json` 的 `role`，缺省为 node。一台机器要同时承担两个角色，起两个守护进程、各用一个配置目录（--config）。
+- 中台只有两个逻辑角色：**node**（认领、执行、回执，可做的状态迁移见 §2、§4、§8）与 **hub**（枢纽）。本标准中凡写「枢纽」「hub」处，均指承担 hub 角色的一方；hub 是 node 角色的单进程超集，既是普通执行节点，又承担中台枢纽服务。
+- 实现是 Node 版 `lah daemon --role node|hub`（命令 `hub-node` 兼容别名可用）。省略 `--role` 时读该进程配置目录里 `node.json` 的 `role`，缺省为 node。单进程、单配置目录即可同时承载干活与枢纽职责，无需再拆两个进程与配置目录。
 - hub 角色的职责：
-  1. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `hub-node task create`，由调用方指定目标节点与技能）；
-  2. 审批中继：给机主发审批卡；处理卡片回调时校验操作者是机主本人；通过后写 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg），并按决定把任务置回 submitted 或置 canceled（§8.3）；
-  3. 取消：写 canceled（审批驳回，或代发起方落表取消请求）；
-  4. 结果呈递：终态、input-required、auth-required、rejected 带回操作者，去重按 §8.5；
-  5. 陈旧任务告警：working 且心跳超时的任务只告警，不替节点回收租约。
+  1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务（含定时任务）；
+  2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能）；
+  3. 审批中继：给机主发审批卡；处理卡片回调时校验操作者是机主本人；通过后写 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg），并按决定把任务置回 submitted 或置 canceled（§8.3）；
+  4. 取消：写 canceled（审批驳回，或代发起方落表取消请求）；
+  5. 结果呈递：终态、input-required、auth-required、rejected 带回操作者，去重按 §8.5；
+  6. 陈旧任务告警：working 且心跳超时的任务只告警，不替节点回收租约。
 - **角色边界**：auth_decision 消息与 canceled 状态只能由 hub 角色的代码路径写入；node 角色从不写这两样，hub 角色是唯一写方。
 - From_Node=hub 是 hub 角色的逻辑名，与它跑在哪台机器无关；node 角色写出的消息，From_Node 仍是本节点名。
 - §8.3 的「有效决定」四条判定、回调鉴权与「终态不可变」等约束不因角色合并而放宽。

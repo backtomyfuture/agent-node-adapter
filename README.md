@@ -5,12 +5,12 @@
 结果呈递；任意终端装上节点适配器即可入列干活，云端 Agent 也能按协议
 直接接入。任务只有一个发起面和一个状态面，全程留痕可查。
 
-> 方向说明（标准 v3.1）：枢纽（hub）是逻辑角色而不是独立进程，由
-> `hub-node daemon --role node|hub` 承载（省略 `--role` 时读 `node.json`
-> 的 `role`，缺省 node）。一台机器要同时当 hub 与 node，起两个守护进程、
-> 各用一个配置目录。仓库只有这一份 Node 实现。唤醒方式为 ws / poll /
-> webhook 三种（webhook 专指飞书自动化出站通知，本项目任何进程不主动推送），
-> 本项目任何进程都不开监听端口。hub 角色强制 ws。
+> 方向说明（标准 v3.1）：枢纽（hub）是逻辑角色，并且是 `node` 的**单进程超集**，
+> 由 `lah daemon --role node|hub`（CLI 简称 `lah`，向下兼容 `hub-node` 别名）承载
+> （省略 `--role` 时读 `node.json` 的 `role`，缺省 node）。单进程单配置目录即可同时
+> 承担 Hub 枢纽职责（全网审批发卡、结果呈递、超时告警）与 Node 执行节点能力（认领执行任务）。
+> 仓库只有这一份 Node 实现。唤醒方式为 ws / poll / webhook 三种（webhook 专指飞书自动化出站通知，
+> 本项目任何进程不主动推送），本项目任何进程都不开监听端口。hub 角色强制 ws。
 
 本仓库包含系统的全部公开部分：
 
@@ -19,7 +19,7 @@
 | 中台标准 v3.1 | [docs/standard.md](docs/standard.md) | 七表对象模型、A2A 八态状态机、通信/审批/幂等协议（规范性文件） |
 | 系统架构 | [docs/architecture.md](docs/architecture.md) | 分层、核心决策与理由、生命周期、故障模型 |
 | Base 结构 | [docs/base-schema.md](docs/base-schema.md) · [schema/](schema/) | 七表字段级定义，由运行中的 Base 生成（附生成器） |
-| 枢纽对接 | [docs/hub-integration.md](docs/hub-integration.md) · `src/hub/` | 枢纽职责、建单纪律、呈递与审批回路；实现是 `hub-node daemon --role hub` |
+| 枢纽对接 | [docs/hub-integration.md](docs/hub-integration.md) · `src/hub/` | 枢纽职责、建单纪律、呈递与审批回路；实现是 `lah daemon --role hub` |
 | 节点适配器 | 本仓库 `bin/` `src/` · [DESIGN.md](DESIGN.md) | 把任何终端变成执行节点：认领 → 拉起本机脚本/Agent → 收回执 → 落日志 |
 | 协议接入 | [docs/protocol-node-runbook.md](docs/protocol-node-runbook.md) | 无守护进程的 Agent 按手册盯表接入（同一套协议） |
 
@@ -42,26 +42,26 @@ flowchart LR
    ```bash
    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
    ```
-   程序安装到 `~/.hub-node/app`，可执行入口链接至 `~/.local/bin/hub-node`。
+   程序安装到 `~/.hub-node/app`，可执行入口链接至 `~/.local/bin/lah`（同时保留 `hub-node` 兼容别名）。
 
 2. **一键向导配置**：
    ```bash
-   hub-node setup
+   lah setup
    ```
-   提示式向导会自动发现 lark-cli 应用、解析 Base 六表 ID、写入 600 权限的 `app.env` 与 `node.json`，种下初始回声能力并运行 `doctor` 自检。最后可直接确认注册开机自启。
+   提示式向导会自动发现 lark-cli 应用、自动识别本机已安装的 Agent（Claude Code、Codex、agy 等）并生成 `commands.json`，解析 Base 七表 ID、写入 600 权限的 `app.env` 与 `node.json`，注册云文档事件订阅实现秒级唤醒，并运行 `doctor` 自检。最后可直接确认注册开机自启。
 
 3. **验收运行**：
    ```bash
-   hub-node doctor      # 检查连通性与能力登记
-   hub-node daemon      # 前台运行试跑（若 setup 中已注册自启则已常驻）
+   lah doctor      # 检查连通性与能力登记
+   lah daemon      # 前台试跑（若 setup 中已注册自启则已常驻）
    ```
-   由中台派发一条 `echo-test` 任务到该节点即可验证回显。
+   由中台派发一条 `echo-test` 或本地 Agent 任务到该节点即可验证执行。
 
 ---
 
-### 路径 B：自建中台（单机起 hub + node 双角色）
+### 路径 B：自建中台（Hub 角色：单进程兼任中台与执行节点）
 
-一台机器同时承担枢纽（发审批/呈递）与执行节点，起两个守护进程、各用一个配置目录与服务：
+一台机器即可同时承担枢纽（发审批/呈递/告警）与执行节点能力（认领执行任务），单进程单目录常驻：
 
 1. **准备 Base**：
    按照 [docs/base-schema.md](docs/base-schema.md) 在飞书多维表格中建好七张标准表，获取 Base 链接与机主的 `open_id`。安装程序：
@@ -71,17 +71,15 @@ flowchart LR
 
 2. **配置并启动枢纽（hub）**：
    ```bash
-   hub-node setup --role hub --config ~/.hub-node-hub --owner <机主open_id>
-   hub-node service --role hub --config ~/.hub-node-hub
+   lah setup --role hub --owner <机主open_id>
    ```
-   hub 强制长连接（ws），向导会尝试向 Base 注册云文档事件订阅；服务名为 `hub-node-hub.hub`。
+   hub 角色自动包含 node 的全部功能：扫描本机 Agent、生成 `commands.json`、注册事件长连接与云文档事件订阅（秒级门铃），并承担全网审批发卡与结果呈递。在向导末尾确认即可直接注册常驻系统自启。
 
-3. **配置并启动执行节点（node）**：
+3. **验收运行**：
    ```bash
-   hub-node setup --role node --config ~/.hub-node
-   hub-node service --role node --config ~/.hub-node
+   lah doctor --role hub
    ```
-   node 服务名为 `hub-node-node.<节点名>`。两套守护进程独立运行、互不覆盖，各自记录日志。
+   服务单进程承载 Hub 与 Node 双重职责，无需额外启动两个进程或维护两套配置目录。
 
 ---
 
@@ -121,13 +119,13 @@ macOS 上由 launchd 拉起的守护进程访问局域网会被系统本地网�
 `"context": "carrier"`，再在你日常的终端（比如常开的 Ghostty/tmux 里）跑：
 
 ```bash
-hub-node host     # 前台常驻，保持终端开启；Ctrl-C 退出
+lah host     # 前台常驻，保持终端开启；Ctrl-C 退出
 ```
 
 守护进程会经本地 unix socket 把这类命令交给 carrier 在终端语境里代跑；
 carrier 不在线时，这些能力在名片上自动标离线、任务明确拒收，绝不静默
 改走直跑。在线状态相对上次成功写表发生变化时，会再强制校准一次名片，
-并且仍是写表成功之后才记住新的 `carrierAvailability`。`hub-node doctor`
+并且仍是写表成功之后才记住新的 `carrierAvailability`。`lah doctor`
 默认只报告 carrier socket 是否在线。
 
 [DESIGN.md](DESIGN.md) §9 注记④ 的限定：carrier 必须由用户在拥有局域网路由
@@ -135,7 +133,7 @@ carrier 不在线时，这些能力在名片上自动标离线、任务明确拒
 在线只说明本机 carrier 在听，不代表远端局域网目标一定可达。要实测该目标：
 
 ```bash
-hub-node doctor --probe <host:port>   # 经在线 carrier 做一次只读 TCP 探测
+lah doctor --probe <host:port>   # 经在线 carrier 做一次只读 TCP 探测
 ```
 
 ## 版本与变更

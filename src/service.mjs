@@ -100,7 +100,7 @@ WantedBy=default.target
 export async function service(configDir, { remove = false, role: explicitRole } = {}, appDir) {
   const role = roleOf(configDir, { role: explicitRole });
   const node = nodeNameOf(configDir);
-  const appBin = path.join(appDir, "bin", "hub-node.mjs");
+  const appBin = path.join(appDir, "bin", "lah.mjs");
   const logPath = path.join(configDir, "daemon.log");
 
   if (process.platform === "darwin") {
@@ -127,7 +127,7 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     console.log(`自启已安装并启动：${label}（role: ${role}）`);
     console.log(`  plist：${plistPath}`);
     console.log(`  日志：${logPath}`);
-    console.log(`  卸载：hub-node service --remove --role ${role} --config ${configDir}`);
+    console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
     return 0;
   }
 
@@ -155,7 +155,7 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     console.log(`自启已安装并启动：${unit}（role: ${role}）`);
     console.log(`  单元：${unitPath}`);
     console.log(`  日志：journalctl --user -u ${unit}`);
-    console.log(`  卸载：hub-node service --remove --role ${role} --config ${configDir}`);
+    console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
     return 0;
   }
 

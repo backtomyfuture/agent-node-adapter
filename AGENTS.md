@@ -1,19 +1,19 @@
 # AGENTS.md — lark-a2a-hub
 
 lark-a2a-hub：以飞书多维表格为共享总线、按 A2A 数据模型调度多 Agent 的中台。
-本仓库只有 Node 实现：`hub-node` 同时承载 node 与 hub 两个逻辑角色，另有中台标准文档。
-方向（标准 v3.1 §10）：hub 是逻辑角色，不是独立进程；由 `hub-node daemon --role node|hub` 承载。省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。一台机器要同时当 hub 与 node 就起两个守护进程、各用一个配置目录（--config）。下文标「计划」的项尚未实现（目前只剩 Rules 自动路由）。
+本仓库只有 Node 实现：`lah`（主入口）与 `hub-node`（兼容别名）同时承载 node 与 hub 两个逻辑角色，另有中台标准文档。
+方向（标准 v3.1 §10）：hub 角色是 node 角色的单进程超集；由 `lah daemon --role node|hub` 承载。省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责全网审批发卡、结果呈递与告警，单进程单配置目录即可搞定，无需拆两个进程。下文标「计划」的项尚未实现（目前只剩 Rules 自动路由）。
 
 ## 目录与职责
 
-- `bin/hub-node.mjs`：CLI 分发 `setup | daemon | doctor | service | host | task create`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `HUB_NODE_HOME` > `~/.hub-node`（内含 `node.json`，node 配置含 `commands.json`）。
+- `bin/lah.mjs` / `bin/hub-node.mjs`：CLI 分发 `setup | daemon | doctor | service | host | task create`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `HUB_NODE_HOME` > `~/.hub-node`（内含 `node.json` 与 `commands.json`）。
 - `src/kernel.mjs`：协议状态机，唯一写任务状态的节点代码。常量 `DAEMON_VERSION`、`HOP_LIMIT=8`、`MAX_RETRIES=2`、`STALE_MIN=20`（无心跳 20 分钟回收）。
 - `src/bus/feishu.mjs`：Bitable REST 客户端（全局 `fetch`）；对 1254291 写冲突与 429/5xx 退避重试；`f1()` 把单元素数组字段取成标量。
 - `src/bus/feishu-events.mjs`：长连接订阅 `drive.file.bitable_record_changed_v1`，只当门铃叫醒内核，不解析事件内容。
 - `src/carrier.mjs`：carrier 语境（unix socket 上的 NDJSON，`ping` / `exec` 两种帧）。
 - `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs`：装机向导、只读自检、LaunchAgent/systemd 用户级自启（均支持 `--role node|hub`）。
 - `src/executors/echo.mjs`：json 模式示例执行器（stdin 读信封，stdout 回显）。
-- `src/hub/`：hub 角色——建单（`hub-node task create`：instruction 消息 → Parts → Tasks 行）、审批发卡、回调校验机主、写 `auth_decision`、写 `canceled`、结果呈递、陈旧任务告警。Rules 自动路由仍为计划。node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
+- `src/hub/`：hub 角色——单进程超集（每轮扫表先由 `Kernel` 认领执行任务并登记能力，再由 `approval` 审批发卡、回调校验机主写 `auth_decision`、写 `canceled`、`present` 结果呈递、`stale` 陈旧任务告警）。建单入口为 `lah task create`。Rules 自动路由仍为计划。node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
 - `src/transport/`：唤醒工厂（`createWaker`），支持 `ws`（长连接门铃 + 卡片回调）与 `poll`（默认 45 秒）两种入站唤醒，外加 15 分钟对账定时兜底；webhook 专指飞书自动化出站 POST，本项目不主动推送。hub 角色强制 ws。
 - `docs/standard.md`：**中台标准，权威**。`docs/base-schema.md` 与 `schema/base-schema.json` 是生成物，由 `schema/generate_schema.mjs` 产出。
 - `config/*.example.json`：配置样例，只放占位符。
@@ -23,14 +23,14 @@ lark-a2a-hub：以飞书多维表格为共享总线、按 A2A 数据模型调度
 ```sh
 npm install --omit=dev                     # 唯一运行时依赖 @larksuiteoapi/node-sdk；未安装时连 -v 都会报模块缺失
 # 语法检查：node --check 只检查第一个文件参数，必须逐个跑；src/**/*.mjs 在默认 shell 里会漏掉 src/*.mjs
-for f in bin/hub-node.mjs src/*.mjs src/*/*.mjs schema/*.mjs; do node --check "$f" || exit 1; done
+for f in bin/*.mjs src/*.mjs src/*/*.mjs schema/*.mjs; do node --check "$f" || exit 1; done
 echo '{"k":1,"_hub":{"task_id":"TASK-X"}}' | node src/executors/echo.mjs   # json 回执冒烟
-node bin/hub-node.mjs doctor  --config <dir> [--role node|hub]   # 示例配置与真实配置各跑一遍
-node bin/hub-node.mjs daemon  --config <dir> [--role node|hub]
-node bin/hub-node.mjs host    --config <dir>   # carrier，只能由用户在终端里启动
-node bin/hub-node.mjs setup   --config <dir> [--role node|hub] [--yes --base … --node … --zone … --prefix … --owner …]
-node bin/hub-node.mjs service --config <dir> [--role node|hub] [--remove]
-node bin/hub-node.mjs task create --config <dir> --to <node> --cap <cap_id> [--text <指令>]
+node bin/lah.mjs doctor  --config <dir> [--role node|hub]   # 示例配置与真实配置各跑一遍
+node bin/lah.mjs daemon  --config <dir> [--role node|hub]
+node bin/lah.mjs host    --config <dir>   # carrier，只能由用户在终端里启动
+node bin/lah.mjs setup   --config <dir> [--role node|hub] [--yes --base … --node … --zone … --prefix … --owner …]
+node bin/lah.mjs service --config <dir> [--role node|hub] [--remove]
+node bin/lah.mjs task create --config <dir> --to <node> --cap <cap_id> [--text <指令>]
 APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… node schema/generate_schema.mjs   # 改表后同步 schema 文档
 ```
 

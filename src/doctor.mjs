@@ -123,7 +123,7 @@ export async function doctor(configDir, appDir, opts = {}) {
 
   const role = roleFrom(process.argv, opts, raw);
 
-  console.log(`hub-node doctor ${DAEMON_VERSION}`);
+  console.log(`lah doctor ${DAEMON_VERSION}`);
   console.log(`role: ${role}`);
   console.log(`config dir: ${configDir}`);
   if (probeProvided && !probe) {
@@ -150,25 +150,24 @@ export async function doctor(configDir, appDir, opts = {}) {
     problems++;
   }
 
-  if (role !== "hub") {
-    try {
-      const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
+  try {
+    const cmdsPath = path.join(configDir, "commands.json");
+    if (fs.existsSync(cmdsPath)) {
+      const cmds = JSON.parse(fs.readFileSync(cmdsPath, "utf8"));
       const names = Object.keys(cmds);
       ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
       for (const [name, entry] of Object.entries(cmds)) {
         if (!entry.command) { bad(`能力 ${name} 缺 command 模板`); problems++; }
       }
-    } catch (e) {
-      bad(`commands.json 读不了：${e.message}`);
+    } else if (role === "hub") {
+      info("未配置 commands.json（hub 仍可承担审批/呈递，但不会认领干活任务）");
+    } else {
+      bad("commands.json 不存在");
       problems++;
     }
-  } else {
-    const hasCmds = fs.existsSync(path.join(configDir, "commands.json"));
-    if (hasCmds) {
-      info("commands.json 已存在（hub 角色不需要能力表，已忽略）");
-    } else {
-      ok("hub 角色无需 commands.json");
-    }
+  } catch (e) {
+    bad(`commands.json 读不了：${e.message}`);
+    problems++;
   }
 
   // 3. 依赖（事件订阅用的飞书 SDK 与 CLI）
@@ -217,10 +216,10 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
     try {
       const cards = await cfg.bus.listRecords(cfg.bus.tables.agentCards);
+      const mine = cards.filter((r) => f1(r, "Node") === cfg.node);
       if (role === "hub") {
-        ok(`AgentCards 可读：总线共 ${cards.length} 项能力在册`);
+        ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力，总线共 ${cards.length} 项在册`);
       } else {
-        const mine = cards.filter((r) => f1(r, "Node") === cfg.node);
         ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力`);
       }
       const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
@@ -322,7 +321,7 @@ export async function doctor(configDir, appDir, opts = {}) {
           if (!online) {
             const caps = carrierCaps.length ? `能力 ${carrierCaps.join(", ")} 将标离线；` : "";
             const via = probe ? `无法探测 ${probe.host}:${probe.port}；` : "";
-            bad(`carrier 离线：${caps}${via}请在终端里跑 hub-node host`);
+            bad(`carrier 离线：${caps}${via}请在终端里跑 lah host`);
             problems++;
           } else if (!probe) {
             ok(SOCKET_ONLINE);
@@ -343,7 +342,7 @@ export async function doctor(configDir, appDir, opts = {}) {
     } else if (probe) {
       const online = await pingCarrier(cfg.carrierSocket);
       if (!online) {
-        bad(`carrier 离线：无法探测 ${probe.host}:${probe.port}；请在终端里跑 hub-node host`);
+        bad(`carrier 离线：无法探测 ${probe.host}:${probe.port}；请在终端里跑 lah host`);
         problems++;
       } else {
         ok("carrier socket 在线，经其执行只读 TCP 探测");
@@ -368,13 +367,13 @@ export async function doctor(configDir, appDir, opts = {}) {
       const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
       const mine = out.split("\n").filter((l) => l.includes("hub-node") || l.includes("agenthub"));
       if (mine.length) ok(`launchd 自启在册：${mine.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`);
-      else info("未发现 hub-node 的 launchd 自启（可用 hub-node service 安装）");
+      else info("未发现 launchd 自启（可用 lah service 安装）");
     } else if (process.platform === "linux") {
       const units = fs.existsSync(path.join(os.homedir(), ".config/systemd/user"))
         ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("hub-node"))
         : [];
       if (units.length) ok(`systemd 用户单元在册：${units.join(", ")}`);
-      else info("未发现 hub-node 的 systemd 用户单元（可用 hub-node service 安装）");
+      else info("未发现 systemd 用户单元（可用 lah service 安装）");
     }
   } catch { /* 自启状态查不到不算失败 */ }
 

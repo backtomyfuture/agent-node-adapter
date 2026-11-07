@@ -2,10 +2,10 @@
 # lark-a2a-hub 一行安装：
 #   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
 # 布局：~/.hub-node/ 是配置目录，~/.hub-node/app/ 是程序本体，
-#       ~/.local/bin/hub-node 是命令入口。
+#       ~/.local/bin/lah 是主命令入口（hub-node 别名向下兼容）。
 # 不在这里种 node.json / commands.json：example 里的占位符和 lan-exec
-# 会让随后的 hub-node setup --yes 拒绝覆盖，或让 doctor 因 carrier 离线失败。
-# 正式配置（含绝对路径 echo 种子）由 hub-node setup 生成。
+# 会让随后的 lah setup --yes 拒绝覆盖，或让 doctor 因 carrier 离线失败。
+# 正式配置（含绝对路径 echo 种子与本地 Agent 自动扫描）由 lah setup 生成。
 # 重跑本脚本 = 更新程序（git pull 或重新下载），已有配置不覆盖。
 set -eu
 
@@ -39,15 +39,16 @@ fi
 cd "$APP"
 npm install --omit=dev --no-audit --no-fund
 
-chmod +x "$APP/bin/hub-node.mjs"
+chmod +x "$APP/bin/lah.mjs" "$APP/bin/hub-node.mjs"
 mkdir -p "$HOME/.local/bin"
-ln -sf "$APP/bin/hub-node.mjs" "$HOME/.local/bin/hub-node"
+ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/lah"
+ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/hub-node"
 
 cat <<EOF
 
 安装完成。接下来只需一条命令完成全部配置：
-  作为节点（干活）：  hub-node setup
-  作为枢纽（发审批）：hub-node setup --role hub --config ~/.hub-node-hub
-（自动装/复用 lark-cli、发现 Base 表、写好配置并自检；细节见 README）
-若 hub-node 命令找不到，把 \$HOME/.local/bin 加入 PATH。
+  作为普通节点：                                  lah setup
+  作为主枢纽节点（干活 + 审批发卡/结果推送）：lah setup --role hub
+（自动装/复用 lark-cli、发现 Base 表、扫描本地 Agent、写好配置并自检；细节见 README）
+若 lah 命令找不到，把 \$HOME/.local/bin 加入 PATH。
 EOF

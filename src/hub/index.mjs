@@ -1,4 +1,4 @@
-// hub 角色主循环：审批发卡、结果呈递、陈旧告警。不认领、不执行。
+// hub 角色主循环：node 能力的超集（单进程承载能力登记与执行、审批发卡、结果呈递、陈旧告警）。
 // 长连接走 src/transport/index.mjs 的 createWaker。调用前把 cfg.role 设为 hub，
 // 工厂才会强制 ws（events:false 也不改发 poll）。本角色不接受纯轮询退路。
 // SDK 只在放弃重连时才让 onStatus(false) 上来；那时停掉当前这条，退避后
@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { Kernel } from "../kernel.mjs";
 import { ApprovalService } from "./approval.mjs";
 import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
@@ -107,7 +108,7 @@ export async function hubDoctor(configDir) {
     bad("配置目录不可写，呈递去重和陈旧告警无法记住已发送项");
     problems++;
   }
-  info("建单：hub-node task create --to <node> --cap <cap_id>。先写 instruction 与 Parts，最后写 Tasks 行。doctor 不写表。");
+  info("建单：lah task create --to <node> --cap <cap_id>。先写 instruction 与 Parts，最后写 Tasks 行。doctor 不写表。");
   return problems;
 }
 
@@ -157,6 +158,7 @@ export class HubRuntime {
     this.stale = stale;
     this.log = log;
     this.createWaker = createWaker ?? null;
+    this.kernel = new Kernel(this.cfg);
     const retry = Number(retryMs);
     this._retryBase = Number.isFinite(retry) && retry >= 0 ? retry : 5000;
     this._delay = this._retryBase;
@@ -217,6 +219,7 @@ export class HubRuntime {
     // 先摘掉引用，stop() 里若再回调 onStatus(false) 不会再开一条。
     this._waker = null;
     this._wsUp = false;
+    if (this.kernel) this.kernel._wsUp = false;
     if (!waker) return;
     try { waker.stop?.(); } catch (e) {
       this.log("hub 长连接关闭失败：" + (e?.message ?? e));
@@ -248,6 +251,7 @@ export class HubRuntime {
       onStatus: (up) => {
         if (this._stopped || !mine || this._waker !== mine) return;
         this._wsUp = !!up;
+        if (this.kernel) this.kernel._wsUp = !!up;
         if (up) {
           this._delay = this._retryBase;
           this.log("hub 长连接已就绪");
@@ -298,13 +302,23 @@ export class HubRuntime {
   }
 
   async run() {
-    this.log(`hub daemon starting（对账 ${this.sweepSec()}s，长连接必需，不使用 poll 退路；含审批、呈递、陈旧告警）`);
+    this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，长连接必需，不使用 poll 退路；含能力登记与接单、审批、呈递、陈旧告警）`);
+    try {
+      await this.cfg.bus.tenantToken();
+    } catch (e) {
+      this.log("initial token failed (will retry in loop): " + (e?.message ?? e));
+    }
     for (;;) {
       if (this._stopped) return;
       this._wakeFlag = false;
       this.refreshOwner();
       if (!this._wsUp) {
-        this.log("hub 长连接未就绪：本轮只做对账（审批、呈递、告警）。正在按退避重建一条长连接，不会改为纯轮询，也不会同时保持两条。");
+        this.log("hub 长连接未就绪：本轮只做对账。正在按退避重建一条长连接，不会改为纯轮询，也不会同时保持两条。");
+      }
+      try {
+        await this.kernel.sweepOnce();
+      } catch (e) {
+        this.log("kernel sweep error: " + (e?.message ?? e));
       }
       for (const [name, job] of [
         ["approval", () => this.approval?.scan()],

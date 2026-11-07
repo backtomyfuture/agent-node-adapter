@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+- CLI 重命名为 `lah` 与 Hub 角色单进程超集升级：
+  - 推出统一 CLI 主入口 `lah`（`lark-a2a-hub` 缩写，`bin/lah.mjs`），`bin/hub-node.mjs` 保留并重导出 `lah` 作为 100% 向下兼容别名；`package.json` 与 `install.sh` 同步更新支持 `lah` 与 `hub-node` 双命令软链接；
+  - `hub` 角色升级为 `node` 角色的**单进程超集**：
+    - `src/hub/index.mjs` 内置 `Kernel` 实例，在同一事件循环中先调度执行本节点任务扫描与能力名片登记，再顺序执行审批发卡、结果呈递与陈旧任务告警；
+    - 单一进程、单一配置目录（默认 `~/.hub-node`）即可兼任 Hub 枢纽与普通 Node 执行节点，彻底消除单机自建中台需维护双进程与双配置目录（`~/.hub-node-hub` 与 `~/.hub-node`）的复杂性；
+    - `lah setup --role hub` 统一支持本地终端 Agent 自动扫描、`commands.json` 生成与自启服务注册；
+    - 中台标准（`docs/standard.md` §0 第 6 条、§10.1）与 `README.md`、`AGENTS.md` 同步更新权威定义。
+
 - 装机、自检与事件传输优化（复用本机 `lark-cli`、Local Event Bus 与本地 Agent 自动扫描）：
   - `install.sh` 移除预先生成空壳 `app.env` 的步骤；
   - `hub-node setup` 优先检测并复用本机 `lark-cli`（支持新版 `lark-cli` AES-256-GCM 安全存储自动解密、未初始化时自动交互式调起 `lark-cli config init`、自动探测包含 6 张标准表的多维表格 Base 作为默认值、以 `--as user` 注册并校验云文档事件订阅）；

@@ -156,7 +156,7 @@ function ensureLarkCli() {
   try {
     execSync("npm install -g @larksuite/cli", { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
   } catch {
-    console.error("  ✗ npm 安装 lark-cli 失败。请先确认 Node.js/npm 可用，再重跑 hub-node setup。");
+    console.error("  ✗ npm 安装 lark-cli 失败。请先确认 Node.js/npm 可用，再重跑 lah setup。");
     return false;
   }
   const v2 = larkVersion();
@@ -731,7 +731,7 @@ export async function runSetup(configDir, argv, appDir) {
   };
 
   try {
-    console.log(`hub-node setup —— 一键配置${role === "hub" ? "枢纽（hub）" : "节点（node）"}`);
+    console.log(`lah setup —— 一键配置${role === "hub" ? "主枢纽（hub，干活＋审批呈递）" : "节点（node）"}`);
     console.log(`role: ${role}`);
     console.log(`config dir: ${configDir}`);
 
@@ -773,7 +773,7 @@ export async function runSetup(configDir, argv, appDir) {
         }
         if (!larkCfg && !appId) {
           console.error("  ✗ lark-cli 还没有配置任何飞书应用。");
-          console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `hub-node setup`。");
+          console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `lah setup`。");
           return 2;
         }
       }
@@ -888,7 +888,7 @@ export async function runSetup(configDir, argv, appDir) {
       if (/tenant token failed/i.test(e.message)) {
         console.error("    凭据换不到 token：多半是 App Secret 不对，或应用未发布/未启用。核对开发者后台的应用凭据后重跑。");
       } else {
-        console.error(`    若是无权限：请在该 Base 的分享设置里把应用 ${appId} 加为「可编辑」，再重跑 hub-node setup。`);
+        console.error(`    若是无权限：请在该 Base 的分享设置里把应用 ${appId} 加为「可编辑」，再重跑 lah setup。`);
       }
       return 3;
     }
@@ -924,8 +924,11 @@ export async function runSetup(configDir, argv, appDir) {
         console.error("  ✗ hub 角色必须配置机主 open_id，未配置时审批回调一律拒绝。");
         return 2;
       }
+      zone = flags.zone || "work";
+      prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
+      nodeDesc = flags.desc ?? "主枢纽节点（干活＋审批呈递）";
       if (interactive) {
-        console.log(`  · 即将配置：枢纽 ${node}（机主 ${ownerOpenId.slice(0, 8)}…），应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+        console.log(`  · 即将配置：主枢纽 ${node}（机主 ${ownerOpenId.slice(0, 8)}…），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
         const go = await ask("开始配置？(Y/n)", "Y");
         if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
       }
@@ -1033,24 +1036,16 @@ export async function runSetup(configDir, argv, appDir) {
     const appEnvPath = path.join(configDir, "app.env");
     fs.writeFileSync(appEnvPath, `APP_ID=${appId}\nAPP_SECRET=${secret}\n`, { mode: 0o600 });
     fs.chmodSync(appEnvPath, 0o600);
-    const nodeJson = role === "hub" ? {
+    const nodeJson = {
       node,
-      role: "hub",
-      ownerOpenId,
+      role,
+      ...(role === "hub" ? { ownerOpenId } : {}),
+      zone: zone || "work",
+      nodeDesc: nodeDesc || "",
       appEnv: appEnvPath,
       baseToken,
+      pollSec: 45,
       sweepSec: 900,
-      events: true,
-      tables,
-    } : {
-      node,
-      role: "node",
-      zone,
-      nodeDesc,
-      appEnv: appEnvPath,
-      baseToken,
-      pollSec,
-      sweepSec,
       events,
       doorbellFile: null,
       capPrefix: prefix,
@@ -1058,53 +1053,49 @@ export async function runSetup(configDir, argv, appDir) {
     };
     fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
 
-    if (role === "node") {
-      const discoveredAgents = discoverLocalAgents();
-      let selectedAgents = [];
-      if (discoveredAgents.length > 0) {
-        console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
-        discoveredAgents.forEach((a, idx) => {
-          console.log(`    ${idx + 1}. [${a.skill}] ${a.name} (${a.path})`);
-        });
+    const discoveredAgents = discoverLocalAgents();
+    let selectedAgents = [];
+    if (discoveredAgents.length > 0) {
+      console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
+      discoveredAgents.forEach((a, idx) => {
+        console.log(`    ${idx + 1}. [${a.skill}] ${a.name} (${a.path})`);
+      });
 
-        let pick = "all";
-        if (interactive) {
-          pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
-        }
-        const p = String(pick).trim().toLowerCase();
-        if (p === "none" || p === "0") {
-          selectedAgents = [];
-        } else if (p === "all" || p === "" || p === "y" || p === "yes") {
-          selectedAgents = discoveredAgents;
-        } else {
-          const indices = p.split(/[,，\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= discoveredAgents.length);
-          selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
-        }
+      let pick = "all";
+      if (interactive) {
+        pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
+      }
+      const p = String(pick).trim().toLowerCase();
+      if (p === "none" || p === "0") {
+        selectedAgents = [];
+      } else if (p === "all" || p === "" || p === "y" || p === "yes") {
+        selectedAgents = discoveredAgents;
       } else {
-        console.log("  · 未扫描到常见本机终端 Agent（仅配置 echo-test 种子能力）");
+        const indices = p.split(/[,，\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= discoveredAgents.length);
+        selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
       }
-
-      const cmdPath = path.join(configDir, "commands.json");
-      const cmdExisted = fs.existsSync(cmdPath);
-      let existingCmds = {};
-      let isExample = false;
-      if (cmdExisted) {
-        try {
-          existingCmds = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
-          isExample = isExampleCommands(existingCmds);
-        } catch { /* 留着，下面不覆盖 */ }
-      }
-
-      // 如果原来是示例命令或不存在，以 echoSeed 为基础，否则保留已有命令
-      const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
-      const finalCmds = buildAgentCommands(selectedAgents, baseCmds);
-
-      fs.writeFileSync(cmdPath, JSON.stringify(finalCmds, null, 1) + "\n");
-      const names = Object.keys(finalCmds);
-      console.log(`  ✓ 已写入 app.env（600）、node.json、commands.json（共 ${names.length} 项能力：${names.join(", ")}）`);
     } else {
-      console.log("  ✓ 已写入 app.env（600）、node.json（hub 角色不需要 commands.json）");
+      console.log("  · 未扫描到常见本机终端 Agent（仅配置 echo-test 种子能力）");
     }
+
+    const cmdPath = path.join(configDir, "commands.json");
+    const cmdExisted = fs.existsSync(cmdPath);
+    let existingCmds = {};
+    let isExample = false;
+    if (cmdExisted) {
+      try {
+        existingCmds = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
+        isExample = isExampleCommands(existingCmds);
+      } catch { /* 留着，下面不覆盖 */ }
+    }
+
+    // 如果原来是示例命令或不存在，以 echoSeed 为基础，否则保留已有命令
+    const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
+    const finalCmds = buildAgentCommands(selectedAgents, baseCmds);
+
+    fs.writeFileSync(cmdPath, JSON.stringify(finalCmds, null, 1) + "\n");
+    const names = Object.keys(finalCmds);
+    console.log(`  ✓ 已写入 app.env（600）、node.json、commands.json（共 ${names.length} 项能力：${names.join(", ")}）`);
 
     // 6. 自检
     let dc = await doctor(configDir, appDir, { role });
@@ -1119,7 +1110,7 @@ export async function runSetup(configDir, argv, appDir) {
       }
     }
     if (dc !== 0) {
-      console.error(`  ✗ 自检未全过，按上面清单修完后运行 \`hub-node doctor${role === "hub" ? " --role hub" : ""}\` 复查。`);
+      console.error(`  ✗ 自检未全过，按上面清单修完后运行 \`lah doctor${role === "hub" ? " --role hub" : ""}\` 复查。`);
       return dc;
     }
 
@@ -1131,12 +1122,12 @@ export async function runSetup(configDir, argv, appDir) {
       if (sc !== 0) { console.error("  ✗ 自启注册失败，看上面输出。"); return sc; }
       console.log("  ✓ 自启已注册、守护已启动。");
     } else {
-      console.log(`  · 未注册自启；手动运行守护：hub-node daemon${role === "hub" ? " --role hub" : ""} --config ${configDir}`);
+      console.log(`  · 未注册自启；手动运行守护：lah daemon${role === "hub" ? " --role hub" : ""} --config ${configDir}`);
     }
     if (role === "hub") {
-      console.log(`setup 完成：枢纽 hub 就绪（机主已绑定），可通过 hub-node daemon --role hub 常驻。`);
+      console.log(`setup 完成：主枢纽 ${node} 就绪（机主已绑定，带 ${names.length} 项本地能力），可通过 lah daemon --role hub 常驻。`);
     } else {
-      console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-），枢纽派 echo-test 到 ${node} 即可验收。`);
+      console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-，带 ${names.length} 项本地能力），可通过 lah daemon 常驻。`);
     }
     return 0;
   } finally {
