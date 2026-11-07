@@ -12,6 +12,7 @@
 4. **机主审批红线**：涉及对外发消息、删改数据、花钱、提交表单、改权限的动作，最终只认机主本人在聊天里的亲口确认；表中标记仅作参考（auth-required 流程见 §8.3）。
 5. **凭据与敏感原文不入表、不进载荷**；结果回传统一「摘要＋指针」。
 6. **hub 是 node 的单进程超集**：枢纽（hub）是一组逻辑职责，也是普通执行节点（node）的超集——单进程、单配置目录即可同时承载，无需再拆两个进程。由 `lah daemon --role node|hub`（兼容 `hub-node`）承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json`、登记 `AgentCards`、认领并执行指派给自己的任务（含定时任务），又强制开启长连接（`ws`）并额外承担全网 `auth-required` 审批发卡与 `card.action.trigger` 回调处理、结果呈递、以及 `stale` 超时告警。凡本标准归给枢纽的约束，由承担 hub 角色的一方遵守（§10.1）。
+7. **发起方身份与回执原路返回**：任何节点或 Agent 都可以作为任务入口。`lah task create` 默认以发起节点作为首条 `instruction` 消息的 `From_Node` 与 `Tasks.Source`。执行节点写回执消息（`result`、`question`、`notice` 等）时，`To_Node` 原路指向该任务首条 `instruction` 消息的 `From_Node`（回退 `Source` || `"hub"`）；唯独 `auth_request` 的 `To_Node` 固定为 `"hub"`（统一由主节点发飞书审批卡）。结果呈递按「谁发起、回给谁」原则落入发起节点的本地 `present_queue.jsonl`，飞书端只发审批卡，不再刷屏纯文本（§8.5）。
 
 ## 1. 对象总览（七表，形态 B：A2A 主干＋本地扩展列）
 
@@ -184,10 +185,19 @@
 **附则（automation 唤醒型节点，2026-11-04 P3 实测补充）**：某些 automation 型节点目前只有「Tasks 表新增记录」才能唤醒，Messages 新增唤不醒它。在 Messages 表自动化（新增记录→调其 webhook）就绪前，枢纽给这类节点的 answer 采取双写：Messages 写正文，另建一条轻量 Tasks 信号行（新任务形态、标题注明「答复信号」并指向 Msg_ID 与原 Task_ID）仅作唤醒，信号行不承载内容、接收方勿当新任务执行。自动化就绪后本附则自动失效。
 
 - 通知只报「哪个任务、什么新状态、哪条新消息」，内容由接收方回表拉全量（沿 A2A Push 语义）。
-- 对机主的呈递沿现行实现：表变更经长连接叫醒 hub 角色，并按对账周期（默认 15 分钟）扫全表，把终态、input-required、auth-required、rejected 直接发到机主私聊；不再经呈递队列文件。input-required 与 auth-required 的新消息属于必须呈递项。
-- **呈递去重**按「任务＋当前 Status_Msg」即 (Task_ID, Status_Msg) 计，而不是按任务计：同一任务每出现一条新的 question / auth_request 都是新的呈递项，答复续跑或批准后到达的终态结果也要再呈递一次。已呈递的 Msg_ID 记在 Tasks.Metadata；Presented 只表示该任务当前状态是否已呈递，不能单独作为去重依据。
+- **结果呈递原路落盘唤醒 Agent，飞书端只发审批卡**：
+  - 飞书端只由 `role=hub` 发送 `auth-required` 交互式审批卡（以及可选的 `stale` 告警），不再往飞书发送大段纯文本结果刷屏。
+  - 结果呈递遵循「谁发起、回给谁」原则：节点在收到 WebSocket 变更事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`input-required`）写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / Hook 消费并在当前对话界面中直接回复用户。去重键记在 `present_state.json` 与线上的 `Tasks.Metadata.presented_keys`，并标记 `Presented="Yes"`。
+  - 特殊归属：`From_Node` 或 `Source` 为 `"hub"` 或 `"cron"`（定时任务）的任务，统一由 `role=hub` 的主节点收入其 `present_queue.jsonl`，交由主节点 Agent 汇报。
+- **呈递去重**按「任务＋当前 Status_Msg」即 (Task_ID, Status_Msg) 计，终态再带上 Status。同一任务每出现一条新的 question / auth_request 都是新的呈递项，答复续跑或批准后到达的终态结果也要再呈递一次。已呈递的 Msg_ID 记在 Tasks.Metadata；Presented 只表示该任务当前状态是否已呈递，不能单独作为去重依据。
 
 ## 修订记录
+
+**v3.2（2026-11-07，原路返回与本地队列呈递，飞书仅发审批卡）**：
+- 明确任何节点均可作为任务发起入口，`lah task create` 默认以本机为 `From_Node` 与 `Tasks.Source`。
+- 执行节点写回执消息时，`To_Node` 原路指向任务首条 `instruction` 的 `From_Node`（回退 `Source` || `"hub"`）；唯独 `auth_request` 消息的 `To_Node` 固定为 `"hub"`（统一由主节点发飞书卡片）。
+- 结果呈递（`completed`、`failed`、`rejected`、`input-required`）按「谁发起、回给谁」落入本地 `present_queue.jsonl`，飞书端不再发送文本消息刷屏，实现安静协作与本地 Agent 闭环消费。
+- 新增 `lah task reply`（原任务答复续跑）、`lah task show` 与 `lah present --pop` 子命令，并内置自动分发 `lah` Skill。
 
 **v3.0（2026-11-04 晚，机主选定形态 B：A2A 原生主干＋本地扩展列）**：在 v2.2 基础上完成 A2A 完全体对齐——新增 Parts 表（消息与产物的内容块，text/file/data 三型）；Tasks 删除 Payload（参数迁首条 instruction 的 DataPart）与 Tasks 级 Ref_Task_IDs（迁 Messages 级，原生 referenceTaskIds），新增原生 Metadata；Messages 删除 Content/Content_Type（正文全量走 Parts）；Artifacts 删除 Type/Pointer/Version（内容走 FilePart，修订＝同名新 ID），新增原生 Description/Metadata；Nodes 表更名 AgentCards，Capability 改名 Description，补齐名片字段（Skill_Name、Tags、Examples、Input_Modes、Output_Modes、Default_Input/Output_Modes、Cap_Streaming/Cap_Push/Cap_State_History），存量三行已回填。七项总线运营字段（Target_Node、认领租约 Claimed_By/Heartbeat_At、Hop_Count、Retry_Count、任务级 Idempotency_Key、Presented、Source 及同类）经缺口分析确认为 A2A 点对点模型不建模的部分，以本地扩展列形式保留并逐项标注；其余本地需求一律进 Metadata。代码全量同步：守护进程 worker-3.0.0、呈递管线（Parts 拼接正文）、审批卡（上下文展示）、审批回调（auth_decision 写 TextPart＋DataPart）。TASK-HUB-V2-CUTOVER-001 已关单，切换通知改发 TASK-HUB-V3-NOTICE-001。
 
@@ -216,7 +226,7 @@
   2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能）；
   3. 审批中继：给机主发审批卡；处理卡片回调时校验操作者是机主本人；通过后写 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg），并按决定把任务置回 submitted 或置 canceled（§8.3）；
   4. 取消：写 canceled（审批驳回，或代发起方落表取消请求）；
-  5. 结果呈递：终态、input-required、auth-required、rejected 带回操作者，去重按 §8.5；
+  5. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；飞书端只发审批卡，不发大段文本刷屏；
   6. 陈旧任务告警：working 且心跳超时的任务只告警，不替节点回收租约。
 - **角色边界**：auth_decision 消息与 canceled 状态只能由 hub 角色的代码路径写入；node 角色从不写这两样，hub 角色是唯一写方。
 - From_Node=hub 是 hub 角色的逻辑名，与它跑在哪台机器无关；node 角色写出的消息，From_Node 仍是本节点名。

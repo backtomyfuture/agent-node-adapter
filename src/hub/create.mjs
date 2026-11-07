@@ -56,7 +56,7 @@ export function parseParams(raw) {
 
 export function parseCreateArgv(argv) {
   const out = {
-    configDir: "", to: "", cap: "", text: "", paramsRaw: undefined, context: "", ref: "", approval: "",
+    configDir: "", from: "", source: "", to: "", cap: "", text: "", paramsRaw: undefined, context: "", ref: "", approval: "",
   };
   const take = (i, flag) => {
     const value = argv[i + 1];
@@ -66,6 +66,8 @@ export function parseCreateArgv(argv) {
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--config") out.configDir = take(i, flag);
+    else if (flag === "--from") out.from = take(i, flag);
+    else if (flag === "--source") out.source = take(i, flag);
     else if (flag === "--to") out.to = take(i, flag);
     else if (flag === "--cap") out.cap = take(i, flag);
     else if (flag === "--text") out.text = take(i, flag);
@@ -107,7 +109,7 @@ function freshTaskId(taken, now) {
 }
 
 export async function createTask({
-  bus, to, cap, text = "", params, context = "", ref = "", approval = "", now = new Date(),
+  bus, from = "", source = "", to, cap, text = "", params, context = "", ref = "", approval = "", now = new Date(),
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
     throw new Error("总线缺少 messages / parts / tasks 表");
@@ -116,6 +118,8 @@ export async function createTask({
   const skill = String(cap ?? "").trim();
   if (!node) throw new Error("task create 需要 --to <node>");
   if (!skill) throw new Error("task create 需要 --cap <cap_id>");
+  const sender = String(from || source || "hub").trim();
+  const taskSource = String(source || from || "hub").trim();
   const data = parseParams(params);
   const approvalClass = String(approval ?? "").trim();
   if (approvalClass && !APPROVALS.has(approvalClass)) {
@@ -154,7 +158,7 @@ export async function createTask({
     Msg_ID: msgId,
     Task_ID: taskId,
     Context_ID: contextId,
-    From_Node: "hub",
+    From_Node: sender,
     To_Node: node,
     Role: "user",
     Kind: "instruction",
@@ -190,12 +194,12 @@ export async function createTask({
   const taskFields = {
     Task_ID: taskId,
     Title: titleOf(instruction, skill, node),
-    Source: "hub",
+    Source: taskSource,
     Target_Node: node,
     Skill_ID: skill,
     Status: "submitted",
     Hop_Count: hop,
-    Idempotency_Key: `hub-${randomUUID()}`,
+    Idempotency_Key: `${sender}-${randomUUID()}`,
     Context_ID: contextId,
     Presented: "No",
     Retry_Count: 0,

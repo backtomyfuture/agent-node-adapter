@@ -1097,6 +1097,17 @@ export async function runSetup(configDir, argv, appDir) {
     const names = Object.keys(finalCmds);
     console.log(`  ✓ 已写入 app.env（600）、node.json、commands.json（共 ${names.length} 项能力：${names.join(", ")}）`);
 
+    // 自动为本机 Agent 安装 lah 技能
+    try {
+      const skillSrc = path.join(appDir, "skills", "lah", "SKILL.md");
+      const skillDestDir = path.join(os.homedir(), ".agents", "skills", "lah");
+      if (fs.existsSync(skillSrc)) {
+        fs.mkdirSync(skillDestDir, { recursive: true });
+        fs.copyFileSync(skillSrc, path.join(skillDestDir, "SKILL.md"));
+        console.log(`  ✓ 已自动安装 lah Skill 至 ${path.join(skillDestDir, "SKILL.md")}`);
+      }
+    } catch {}
+
     // 6. 自检
     let dc = await doctor(configDir, appDir, { role });
     if (role === "hub") {

@@ -10,7 +10,7 @@ import { f1 } from "../bus/feishu.mjs";
 import { messageText } from "./cards.mjs";
 
 const PRESENT_STATUSES = new Set([
-  "completed", "failed", "rejected", "input-required", "auth-required",
+  "completed", "failed", "rejected", "input-required",
 ]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "rejected"]);
 const MSG_KINDS = new Set([
@@ -22,15 +22,28 @@ const PREFERRED_KIND = {
   failed: "notice",
   rejected: "notice",
   "input-required": "question",
-  "auth-required": "auth_request",
 };
 const STATUS_LABEL = {
   completed: "已完成",
   failed: "失败",
   rejected: "已拒收",
   "input-required": "需要补充信息",
-  "auth-required": "待审批",
 };
+
+export function shouldPresent(task, messages, { nodeName = "", role = "hub" } = {}) {
+  const taskId = String(f1(task, "Task_ID") ?? "");
+  const taskMsgs = messages.filter((m) => String(f1(m, "Task_ID") ?? "") === taskId);
+  const instr = taskMsgs.find((m) => f1(m, "Kind") === "instruction");
+  const from = instr ? String(f1(instr, "From_Node") ?? "").trim() : "";
+  const source = String(f1(task, "Source") ?? "").trim();
+  const initiator = from || source;
+
+  if (nodeName && initiator === nodeName) return true;
+  if (role === "hub" && (!initiator || initiator === "hub" || initiator === "cron" || source === "cron")) {
+    return true;
+  }
+  return false;
+}
 
 export function presentKey(taskId, status, statusMsg) {
   const msg = statusMsg || "";
@@ -140,21 +153,19 @@ function writeState(file, state) {
 }
 
 export class PresentService {
-  constructor({ bus, ownerOpenId = "", statePath, log }) {
+  constructor({ bus, ownerOpenId = "", nodeName = "", role = "hub", statePath, queuePath, log }) {
     this.bus = bus;
     this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.nodeName = String(nodeName ?? "").trim();
+    this.role = String(role ?? "hub").trim();
     this.statePath = statePath;
+    this.queuePath = queuePath || (statePath ? path.join(path.dirname(statePath), "present_queue.jsonl") : null);
     this.log = log ?? (() => {});
   }
 
   async scan() {
-    const owner = String(this.ownerOpenId ?? "").trim();
-    if (!owner) {
-      this.log("hub 未配置机主 open_id，跳过结果呈递");
-      return 0;
-    }
-    if (!this.statePath) {
-      this.log("结果呈递没有状态文件路径，本轮跳过，避免无法去重仍发消息");
+    if (!this.statePath || !this.queuePath) {
+      this.log("结果呈递没有状态文件路径或队列文件路径，本轮跳过");
       return 0;
     }
     const state = readState(this.statePath);
@@ -163,6 +174,8 @@ export class PresentService {
     }
     const seen = new Set(state.keys);
     const tasks = await this.bus.listRecords(this.bus.tables.tasks);
+    const messages = await this.bus.listRecords(this.bus.tables.messages);
+
     const pending = [];
     for (const task of tasks) {
       const status = String(f1(task, "Status") ?? "");
@@ -172,33 +185,68 @@ export class PresentService {
       const statusMsg = String(f1(task, "Status_Msg") ?? "");
       const key = presentKey(taskId, status, statusMsg);
       if (seen.has(key) || metaKeys(task).includes(key)) continue;
+
+      if (!shouldPresent(task, messages, { nodeName: this.nodeName, role: this.role })) {
+        continue;
+      }
       pending.push({ task, taskId, status, statusMsg, key });
     }
     if (!pending.length) return 0;
-    const messages = await this.bus.listRecords(this.bus.tables.messages);
+
     const parts = await this.bus.listRecords(this.bus.tables.parts);
     const runs = await this.bus.listRecords(this.bus.tables.runs);
     let sent = 0;
     for (const item of pending) {
       const msg = latestMessage(messages, item.taskId, item.status);
       const run = runOf(runs, item.task);
+      const taskMsgs = messages.filter((m) => String(f1(m, "Task_ID") ?? "") === item.taskId);
+      const instr = taskMsgs.find((m) => f1(m, "Kind") === "instruction");
+      const fromNode = instr ? String(f1(instr, "From_Node") ?? "").trim() : String(f1(item.task, "Source") ?? "");
+      const msgBody = msg ? messageText(parts, f1(msg, "Msg_ID")) : "";
+      const outcome = run ? String(f1(run, "Outcome") ?? "") : "";
+      const error = run ? String(f1(run, "Error_Log") ?? "") : "";
+      const title = String(f1(item.task, "Title") ?? "");
+      const targetNode = String(f1(item.task, "Target_Node") ?? "");
+      const source = String(f1(item.task, "Source") ?? "");
+      const artifactRef = msg ? String(f1(msg, "Artifact_Ref") ?? "") : "";
+
       const text = presentBody({
         taskId: item.taskId,
-        title: String(f1(item.task, "Title") ?? ""),
+        title,
         status: item.status,
         statusMsg: item.statusMsg,
-        target: String(f1(item.task, "Target_Node") ?? ""),
-        message: msg ? messageText(parts, f1(msg, "Msg_ID")) : "",
-        outcome: run ? String(f1(run, "Outcome") ?? "") : "",
-        error: run ? String(f1(run, "Error_Log") ?? "") : "",
+        target: targetNode,
+        message: msgBody,
+        outcome,
+        error,
       });
+
+      const queueItem = {
+        ts: new Date().toISOString(),
+        present_key: item.key,
+        record_id: item.task.record_id,
+        task_id: item.taskId,
+        title,
+        source,
+        from_node: fromNode,
+        target_node: targetNode,
+        status: item.status,
+        status_msg: item.statusMsg,
+        message: msgBody,
+        artifact_ref: artifactRef,
+        outcome,
+        error,
+        text,
+      };
+
       try {
-        await this.bus.sendMessage(owner, "text", { text });
+        fs.mkdirSync(path.dirname(this.queuePath), { recursive: true });
+        fs.appendFileSync(this.queuePath, JSON.stringify(queueItem) + "\n", { mode: 0o600 });
       } catch (e) {
-        // 没发出去就不记键，下一轮对账再试。
-        this.log("呈递失败 " + item.taskId + "：" + (e?.message ?? e));
+        this.log(`写入 present_queue 失败 ${item.taskId}：${e?.message ?? e}`);
         continue;
       }
+
       if (!seen.has(item.key)) {
         seen.add(item.key);
         state.keys.push(item.key);
@@ -206,10 +254,25 @@ export class PresentService {
       try {
         writeState(this.statePath, state);
       } catch (e) {
-        this.log("present_state.json 写失败，这条可能在下一轮重发：" + (e?.message ?? e));
+        this.log("present_state.json 写失败：" + (e?.message ?? e));
       }
+
+      // 尝试写线上 Tasks 元数据与 Presented="Yes"
+      try {
+        const meta = loadMeta(f1(item.task, "Metadata"));
+        const pkeys = Array.isArray(meta.presented_keys) ? meta.presented_keys.filter((k) => typeof k === "string") : [];
+        if (!pkeys.includes(item.key)) pkeys.push(item.key);
+        meta.presented_keys = pkeys;
+        await this.bus.updateRecord(this.bus.tables.tasks, item.task.record_id, {
+          Presented: "Yes",
+          Metadata: JSON.stringify(meta),
+        });
+      } catch (e) {
+        this.log(`update task ${item.taskId} metadata failed (ignored): ${e?.message ?? e}`);
+      }
+
       sent += 1;
-      this.log("presented " + item.taskId + " " + item.status);
+      this.log("presented " + item.taskId + " " + item.status + " -> " + this.queuePath);
     }
     return sent;
   }

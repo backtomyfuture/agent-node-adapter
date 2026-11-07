@@ -44,6 +44,12 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/lah"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/hub-node"
 
+# 自动安装 lah Skill 给终端 Agent 使用
+mkdir -p "$HOME/.agents/skills/lah"
+if [ -f "$APP/skills/lah/SKILL.md" ]; then
+  cp -f "$APP/skills/lah/SKILL.md" "$HOME/.agents/skills/lah/SKILL.md"
+fi
+
 cat <<EOF
 
 安装完成。接下来只需一条命令完成全部配置：

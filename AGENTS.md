@@ -6,14 +6,14 @@ lark-a2a-hub：以飞书多维表格为共享总线、按 A2A 数据模型调度
 
 ## 目录与职责
 
-- `bin/lah.mjs` / `bin/hub-node.mjs`：CLI 分发 `setup | daemon | doctor | service | host | task create`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `HUB_NODE_HOME` > `~/.hub-node`（内含 `node.json` 与 `commands.json`）。
-- `src/kernel.mjs`：协议状态机，唯一写任务状态的节点代码。常量 `DAEMON_VERSION`、`HOP_LIMIT=8`、`MAX_RETRIES=2`、`STALE_MIN=20`（无心跳 20 分钟回收）。
+- `bin/lah.mjs` / `bin/hub-node.mjs`：CLI 分发 `setup | daemon | doctor | service | host | task (create|reply|show) | present`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `HUB_NODE_HOME` > `~/.hub-node`（内含 `node.json` 与 `commands.json`）。
+- `src/kernel.mjs`：协议状态机，唯一写任务状态的节点代码。常量 `DAEMON_VERSION`、`HOP_LIMIT=8`、`MAX_RETRIES=2`、`STALE_MIN=20`（无心跳 20 分钟回收）。写回执（result/question/notice）时 `To_Node` 原路指向发起方 `From_Node`（auth_request 除外，指向 hub）。node 与 hub 角色在扫表与事件唤醒时均通过 `PresentService` 将属于本节点发起的任务回执落入本地 `present_queue.jsonl` 原路唤醒 Agent。
 - `src/bus/feishu.mjs`：Bitable REST 客户端（全局 `fetch`）；对 1254291 写冲突与 429/5xx 退避重试；`f1()` 把单元素数组字段取成标量。
 - `src/bus/feishu-events.mjs`：长连接订阅 `drive.file.bitable_record_changed_v1`，只当门铃叫醒内核，不解析事件内容。
 - `src/carrier.mjs`：carrier 语境（unix socket 上的 NDJSON，`ping` / `exec` 两种帧）。
-- `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs`：装机向导、只读自检、LaunchAgent/systemd 用户级自启（均支持 `--role node|hub`）。
+- `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs`：装机向导、只读自检、LaunchAgent/systemd 用户级自启（均支持 `--role node|hub`）；自动安装 `lah` Agent Skill。
 - `src/executors/echo.mjs`：json 模式示例执行器（stdin 读信封，stdout 回显）。
-- `src/hub/`：hub 角色——单进程超集（每轮扫表先由 `Kernel` 认领执行任务并登记能力，再由 `approval` 审批发卡、回调校验机主写 `auth_decision`、写 `canceled`、`present` 结果呈递、`stale` 陈旧任务告警）。建单入口为 `lah task create`。Rules 自动路由仍为计划。node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
+- `src/hub/`：hub 角色——单进程超集（每轮扫表先由 `Kernel` 认领执行任务并登记能力，再由 `approval` 审批发卡、回调校验机主写 `auth_decision`、写 `canceled`、`present` 结果呈递到本地队列、`stale` 陈旧任务告警）。建单入口为 `lah task create`。Rules 自动路由仍为计划。node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。飞书端仅发审批交互卡，不发大段纯文本刷屏。
 - `src/transport/`：唤醒工厂（`createWaker`），支持 `ws`（长连接门铃 + 卡片回调）与 `poll`（默认 45 秒）两种入站唤醒，外加 15 分钟对账定时兜底；webhook 专指飞书自动化出站 POST，本项目不主动推送。hub 角色强制 ws。
 - `docs/standard.md`：**中台标准，权威**。`docs/base-schema.md` 与 `schema/base-schema.json` 是生成物，由 `schema/generate_schema.mjs` 产出。
 - `config/*.example.json`：配置样例，只放占位符。
@@ -30,7 +30,10 @@ node bin/lah.mjs daemon  --config <dir> [--role node|hub]
 node bin/lah.mjs host    --config <dir>   # carrier，只能由用户在终端里启动
 node bin/lah.mjs setup   --config <dir> [--role node|hub] [--yes --base … --node … --zone … --prefix … --owner …]
 node bin/lah.mjs service --config <dir> [--role node|hub] [--remove]
-node bin/lah.mjs task create --config <dir> --to <node> --cap <cap_id> [--text <指令>]
+node bin/lah.mjs task create --config <dir> --to <node> --cap <cap_id> [--text <指令>] [--from <node>]
+node bin/lah.mjs task reply --config <dir> --task <Task_ID> --text <答复内容>
+node bin/lah.mjs task show <Task_ID> [--config <dir>]
+node bin/lah.mjs present [--pop] [--config <dir>]
 APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… node schema/generate_schema.mjs   # 改表后同步 schema 文档
 ```
 

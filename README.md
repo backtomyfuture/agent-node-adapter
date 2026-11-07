@@ -55,7 +55,35 @@ flowchart LR
    lah doctor      # 检查连通性与能力登记
    lah daemon      # 前台试跑（若 setup 中已注册自启则已常驻）
    ```
-   由中台派发一条 `echo-test` 或本地 Agent 任务到该节点即可验证执行。
+   安装向导已自动为终端 Agent 安装 `lah` Skill（位于 `~/.agents/skills/lah`），终端 Agent 可以直接发起跨节点调度！
+
+---
+
+### 多 Agent 调度与任务交互（CLI / Agent 通用）
+
+任何入网节点或终端 Agent 都可以派发任务并按原路接收结果：
+
+- **派单**：
+  ```bash
+  lah task create --to <Target_Node> --cap <Skill_ID> --text "指令文本" [--params '{"k":"v"}']
+  ```
+  默认自动以当前节点作为发起方（`From_Node` 与 `Source`）。
+- **消费回执（原路落盘，飞书不刷屏）**：
+  ```bash
+  lah present --pop
+  ```
+  读取并清空属于本机发起的任务回执队列（`~/.hub-node/present_queue.jsonl`），终端 Agent 即可直接在当前对话中向用户汇报。
+- **答复追问**：
+  当任务状态为 `input-required` 时，直接原路答复，目标节点在原任务自动续跑：
+  ```bash
+  lah task reply --task TASK-XXXX --text "答复内容"
+  ```
+- **查看状态与产物**：
+  ```bash
+  lah task show TASK-XXXX
+  ```
+- **审批安全红线**：
+  需要机主授权的动作自动转入 `auth-required`，由主节点在飞书向机主发送卡片，机主点击批准/驳回后自动恢复执行或取消，无需终端手动干预。
 
 ---
 

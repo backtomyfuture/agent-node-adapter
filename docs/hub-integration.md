@@ -1,30 +1,29 @@
 # 枢纽（hub）对接
 
 枢纽是中台的操作者侧：负责把意图变成任务、把结果带回操作者。它不是
-一个独立进程，而是一个**逻辑角色**（标准 §10.1）。实现是 Node 版
-`hub-node daemon --role node|hub`（代码在 `src/hub/`）。省略 `--role` 时
-读该配置目录 `node.json` 的 `role`，缺省 node。一台机器要同时承担 hub
-与 node，起两个守护进程、各用一个配置目录（--config）。本篇是对接规范。
+一个独立进程，而是一个**逻辑角色**，并且是 node 角色的单进程超集（标准 §10.1）。实现是 Node 版
+`lah daemon --role node|hub`（代码在 `src/hub/`，兼容别名 `hub-node`）。省略 `--role` 时
+读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 单进程单配置目录（默认 `~/.hub-node`）
+即可同时承载干活与枢纽职责，无需再拆两个进程。本篇是对接规范。
 
 ## 职责清单
 
-1. **建单与路由**：按 Rules 表与 AgentCards 选目标节点与技能，生成
+1. **建单与路由**：任何节点与 Agent 都可以作为任务入口。按 Rules 表与 AgentCards 选目标节点与技能，生成
    Task_ID / Context_ID / Idempotency_Key 并建单（纪律见下；入口为
-   `hub-node task create`，目标节点与技能由调用方指定。Rules 自动路由仍为计划）。
+   `lah task create`，默认以发起节点为 `From_Node` 与 `Tasks.Source`。Rules 自动路由仍为计划）。
 2. **唤醒与事件接收**：强制以 ws（hub 应用长连接订阅 Base 的记录变更事件
    `drive.file.bitable_record_changed_v1`，并注册 `card.action.trigger`）
    唤醒——审批卡回调只能经长连接送达，不允许纯轮询；对账周期默认 15 分钟
    （`sweepSec`）。事件只当门铃，内容回表读取，并驱动呈递与审批回调。
-3. **结果呈递**：把终态、待答（input-required）、待批（auth-required）
-   与拒收（rejected）及时带回操作者。去重按 (Task_ID, Status_Msg)
-   （终态再带上 Status），已呈递键记在配置目录 `present_state.json`；
-   Tasks.Metadata 里已有的 `presented_keys` 也认。Presented 只表示
-   当前这一态是否已呈递，不能单独当永久去重。
-4. **审批中继**：扫到 auth-required 就发审批卡；回调必须先确认
-   操作者是机主，再把决定落成 auth_decision 并流转状态（标准 §8.3）。
+3. **结果呈递（原路落盘，飞书不再刷屏纯文本）**：
+   - 飞书端只由 `role=hub` 发送 `auth-required` 交互式审批卡（以及可选的 `stale` 告警），不再往飞书发送大段纯文本结果刷屏。
+   - 结果呈递遵循「谁发起、回给谁」原则：节点在收到 WebSocket 变更事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`input-required`）写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / Hook 消费并在当前对话界面中直接回复用户。去重键记在 `present_state.json` 与线上的 `Tasks.Metadata.presented_keys`。
+   - 特殊归属：`From_Node` 或 `Source` 为 `"hub"` 或 `"cron"`（定时任务）的任务，统一由 `role=hub` 的主节点收入其 `present_queue.jsonl`，交由主节点 Agent 汇报。
+4. **审批中继**：扫到 auth-required 就发飞书交互卡片；回调必须先确认
+   操作者是机主，再把决定落成 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg）并流转状态（标准 §8.3）。
 5. **取消**：canceled 只由发起方或 hub 角色写入（审批驳回、代发起方
    落表取消请求）；node 角色不写。
-6. **答复与续派**：操作者的答复写成 answer 消息追加到原任务；派生
+6. **答复与续派**：操作者对 `input-required` 的答复写成 answer 消息（`lah task reply`）追加到原任务，目标节点自动续跑；派生
    任务由枢纽或节点按熔断规则创建。
 7. **对账与告警**：周期性扫表核对状态（漏呈补呈、重复回执按 ID 去重、
    陈旧任务告警），是事件直达之外的安全网。
@@ -90,14 +89,16 @@ node 角色从不写这两样，hub 角色是唯一写方。
    指向原 Task_ID 与 Msg_ID）仅作唤醒；信号行不承载内容、接收方勿当
    新任务执行。对方的 Messages 自动化就绪后停用。
 
-## 呈递
+## 呈递（原路落盘消费）
 
-`hub-node daemon --role hub` 在对账周期里扫全表 Tasks（长连接事件只是提前叫醒）：
+`lah daemon` 在收到 WebSocket 变更事件或对账扫表时处理结果呈递：
 
-- 要呈递的状态：completed、failed、rejected、input-required、auth-required。
-- 去重键不是「一个任务只呈递一次」：中断态是 (Task_ID, Status_Msg)；终态的
-  Status_Msg 常被清空或仍指向旧 question，键再带上 Status。因此 question /
-  auth_request 续跑后的新提问，以及最终 completed / failed，都会再发一次。
+- 要呈递的状态：completed、failed、rejected、input-required（不再包含 auth-required，审批单独走卡片）。
+- 原路分流与落盘：
+  - 发起节点（`From_Node === 本节点`）将结果写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / Hook 消费。
+  - `Source="hub"` 或 `"cron"`（定时任务）归 `role=hub` 的主节点消费。
+- 去重键：中断态是 (Task_ID, Status_Msg)；终态带上 Status。已呈递键记在 `present_state.json` 与线上 `Tasks.Metadata.presented_keys`。
+- 飞书端保持宁静：不在飞书私聊发送文本结果，飞书端只接收交互式审批卡片。
 - 已发送的键写在配置目录 `present_state.json`（不进仓库，不回写 Tasks）。
   Tasks.Metadata 里已有的 `presented_keys` 同样视为已呈递。
 - 正文直接发到机主私聊。未配置机主 open_id 则本轮跳过。没有队列文件。

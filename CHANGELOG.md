@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+- 按发起方原路返回结果、飞书仅发审批卡、内置并自动安装 lah Skill（中台标准 v3.2）：
+  - **发起方身份与回执原路指向**：
+    - 任何节点与 Agent 均可作为任务入口，`lah task create` 默认以本机为首条 `instruction` 的 `From_Node` 及 `Tasks.Source`（亦可通过 `--from` / `--source` 显式指定）；
+    - `src/kernel.mjs` 新增 `initiatorOf(task)`，执行节点写回执消息（`result` / `question` / `notice`）时，`To_Node` 原路指向发起方 `From_Node`（回退 `Source` || `"hub"`）；唯独 `auth_request` 的 `To_Node` 固定为 `"hub"`（统一由主节点发飞书卡片）；
+  - **结果呈递原路落盘，飞书保持静默**：
+    - 飞书端只由 `role=hub` 发送 `auth-required` 交互式审批卡（以及可选的 `stale` 告警），不再往飞书发送大段纯文本结果刷屏；
+    - `src/hub/present.mjs` 结果呈递按「谁发起、回给谁」原则，在收到 WebSocket 事件或对账扫表时，将属于本节点发起的任务回执（`completed` / `failed` / `rejected` / `input-required`）写入本机配置目录的 `present_queue.jsonl`（600 权限），供本机 Agent / Hook 消费并在当前对话界面直接回复用户；
+    - 特殊归属：`Source="hub"` 或 `"cron"`（定时任务）的任务统一由 `role=hub` 的主节点收入其 `present_queue.jsonl`，交由主节点 Agent 汇报；
+    - `Tasks` 线上状态与 `Metadata.presented_keys` 同步标记；
+  - **CLI 补充多 Agent 调度子命令**：
+    - `lah task create`：默认以本机为发起方；
+    - `lah task reply --task <Task_ID> --text <答复内容>`：原任务追加 `answer` 消息，目标节点原位自动续跑；
+    - `lah task show <Task_ID>`：输出任务状态、最新消息正文与产物列表；
+    - `lah present [--pop]`：读取本机回执队列（`--pop` 读后清空），方便 Agent 轮询消费；
+  - **内置并自动安装 lah Skill**：
+    - 新增 `skills/lah/SKILL.md`，提供完整的多 Agent 跨节点调度标准操作指引；
+    - `install.sh` 与 `src/setup.mjs` 在安装/配置时自动安装至 `~/.agents/skills/lah/SKILL.md`，终端 Agent 装完立即可用；
+  - **标准与文档全面同步**：
+    - 更新 `docs/standard.md`（§0、§8.5、§10.1 及修订记录 v3.2）、`docs/hub-integration.md`、`AGENTS.md`、`README.md`。
+
 - 修复审批卡回调重复处理与空壳载荷误报问题：
   - `src/transport/ws.mjs`：
     - 禁止 `bus.log` 文本监控触发 `extraHandlers`：`_startBusLogMonitor` 与 `_dispatchBusEvent` 仅用于 `EVENT_TYPE`（多维表格变更门铃唤醒），彻底杜绝从纯文本日志产生无载荷空壳事件分发给 `card.action.trigger`；

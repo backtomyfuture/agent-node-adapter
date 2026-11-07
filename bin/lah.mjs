@@ -230,18 +230,16 @@ if (cmd === "setup") {
   }
 } else if (cmd === "task") {
   const sub = rest[0];
-  if (sub !== "create") {
-    console.error("用法：lah task create --config <dir> --to <node> --cap <cap_id> [--text <指令>] [--params <json 或 @文件>] [--context <Context_ID>] [--ref <Task_ID,...>] [--approval approve|notify|auto]");
-    process.exitCode = 1;
-  } else {
+  if (sub === "create") {
     try {
       const { parseCreateArgv, parseParams, createTask } = await import("../src/hub/create.mjs");
       const args = parseCreateArgv(rest.slice(1));
-      // 控制键在读凭据、写表之前拒绝。
       parseParams(args.paramsRaw);
       const cfg = loadConfig(args.configDir || configDirFrom(rest));
       const taskId = await createTask({
         bus: cfg.bus,
+        from: args.from || cfg.node,
+        source: args.source || args.from || cfg.node,
         to: args.to,
         cap: args.cap,
         text: args.text,
@@ -255,6 +253,162 @@ if (cmd === "setup") {
       console.error(e?.message ?? e);
       process.exitCode = 1;
     }
+  } else if (sub === "reply") {
+    const argv = rest.slice(1);
+    let taskId = "";
+    let text = "";
+    let configDir = "";
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (flag === "--task") taskId = argv[++i] ?? "";
+      else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--config") configDir = argv[++i] ?? "";
+      else if (!flag.startsWith("--") && !taskId) taskId = flag;
+    }
+    if (!taskId) {
+      console.error("用法：lah task reply --task <Task_ID> --text <答复内容>");
+      process.exitCode = 1;
+    } else if (!text) {
+      console.error("lah task reply 需要 --text <答复内容>");
+      process.exitCode = 1;
+    } else {
+      try {
+        const { f1 } = await import("../src/bus/feishu.mjs");
+        const cfg = loadConfig(configDir || configDirFrom(rest));
+        const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
+        const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
+        if (!task) throw new Error(`任务不存在：${taskId}`);
+        const status = f1(task, "Status");
+        if (status !== "input-required") {
+          throw new Error(`任务当前状态为 ${status}，不是 input-required，无法答复。`);
+        }
+        const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+        const messages = (await cfg.bus.listRecords(cfg.bus.tables.messages))
+          .filter((m) => f1(m, "Task_ID") === taskId);
+        let max = 0;
+        for (const m of messages) {
+          const id = String(f1(m, "Msg_ID") ?? "");
+          const matched = id.match(/-(\d+)$/);
+          if (matched) {
+            const n = Number(matched[1]);
+            if (n > max) max = n;
+          }
+        }
+        const seq = max + 1;
+        const msgId = `MSG-${taskId.replace("TASK-", "")}-${String(seq).padStart(2, "0")}`;
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        const nowMinute = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+
+        await cfg.bus.createRecord(cfg.bus.tables.messages, {
+          Msg_ID: msgId,
+          Task_ID: taskId,
+          Context_ID: f1(task, "Context_ID"),
+          From_Node: cfg.node,
+          To_Node: f1(task, "Target_Node"),
+          Role: "user",
+          Kind: "answer",
+          In_Reply_To: statusMsg,
+          Created_At: nowMinute,
+        });
+        await cfg.bus.createRecord(cfg.bus.tables.parts, {
+          Part_ID: `${msgId}-P1`,
+          Parent_ID: msgId,
+          Parent_Type: "message",
+          Seq: 1,
+          Kind: "text",
+          Text: text.slice(0, 4000),
+        });
+        console.log(`已答复：${msgId}`);
+      } catch (e) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    }
+  } else if (sub === "show") {
+    const argv = rest.slice(1);
+    let taskId = "";
+    let configDir = "";
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (flag === "--task") taskId = argv[++i] ?? "";
+      else if (flag === "--config") configDir = argv[++i] ?? "";
+      else if (!flag.startsWith("--") && !taskId) taskId = flag;
+    }
+    if (!taskId) {
+      console.error("用法：lah task show <Task_ID> [--config <dir>]");
+      process.exitCode = 1;
+    } else {
+      try {
+        const { f1 } = await import("../src/bus/feishu.mjs");
+        const { messageText } = await import("../src/hub/cards.mjs");
+        const cfg = loadConfig(configDir || configDirFrom(rest));
+        const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
+        const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
+        if (!task) throw new Error(`任务不存在：${taskId}`);
+        const messages = (await cfg.bus.listRecords(cfg.bus.tables.messages))
+          .filter((m) => f1(m, "Task_ID") === taskId);
+        const parts = await cfg.bus.listRecords(cfg.bus.tables.parts);
+        const artifacts = cfg.bus.tables.artifacts
+          ? (await cfg.bus.listRecords(cfg.bus.tables.artifacts)).filter((a) => f1(a, "Task_ID") === taskId)
+          : [];
+
+        const lastMsg = messages.length ? messages[messages.length - 1] : null;
+        const lastMsgText = lastMsg ? messageText(parts, f1(lastMsg, "Msg_ID")) : "";
+
+        const out = {
+          task_id: taskId,
+          title: f1(task, "Title"),
+          status: f1(task, "Status"),
+          skill_id: f1(task, "Skill_ID"),
+          target_node: f1(task, "Target_Node"),
+          source: f1(task, "Source"),
+          status_msg: f1(task, "Status_Msg"),
+          retry_count: f1(task, "Retry_Count"),
+          claimed_by: f1(task, "Claimed_By"),
+          last_message: lastMsg ? {
+            msg_id: f1(lastMsg, "Msg_ID"),
+            kind: f1(lastMsg, "Kind"),
+            from: f1(lastMsg, "From_Node"),
+            to: f1(lastMsg, "To_Node"),
+            role: f1(lastMsg, "Role"),
+            text: lastMsgText,
+          } : null,
+          artifacts: artifacts.map((a) => ({
+            artifact_id: f1(a, "Artifact_ID"),
+            name: f1(a, "Name"),
+            description: f1(a, "Description"),
+          })),
+        };
+        console.log(JSON.stringify(out, null, 2));
+      } catch (e) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    }
+  } else {
+    console.error("用法：lah task create | reply | show");
+    process.exitCode = 1;
+  }
+} else if (cmd === "present") {
+  const isPop = rest.includes("--pop");
+  const configDir = configDirFrom(rest);
+  const queuePath = path.join(configDir, "present_queue.jsonl");
+  try {
+    if (!fs.existsSync(queuePath)) {
+      process.exitCode = 0;
+    } else {
+      const content = fs.readFileSync(queuePath, "utf8");
+      if (isPop) {
+        fs.writeFileSync(queuePath, "", { mode: 0o600 });
+      }
+      if (content.trim()) {
+        process.stdout.write(content);
+      }
+    }
+  } catch (e) {
+    console.error("读取 present_queue.jsonl 失败：" + (e?.message ?? e));
+    process.exitCode = 1;
   }
 } else if (cmd === "--version" || cmd === "-v") {
   console.log(DAEMON_VERSION);
@@ -266,5 +420,8 @@ if (cmd === "setup") {
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
   lah host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）
-  lah task create --config <dir> --to <node> --cap <cap_id> [--text <指令>] [--params <json 或 @文件>] [--context <Context_ID>] [--ref <Task_ID,...>] [--approval approve|notify|auto]`);
+  lah task create --to <node> --cap <cap_id> [--text <指令>] [--from <node>] [--params <json 或 @文件>]
+  lah task reply  --task <Task_ID> --text <答复内容>
+  lah task show   <Task_ID>
+  lah present     [--pop]  读取本机结果呈递队列（--pop 同时清空）`);
 }

@@ -10,6 +10,7 @@ import path from "node:path";
 import { FeishuBus, f1 } from "./bus/feishu.mjs";
 import { createWaker } from "./transport/index.mjs";
 import { execViaCarrier, pingCarrier, runDetachedCommand } from "./carrier.mjs";
+import { PresentService } from "./hub/present.mjs";
 
 export const DAEMON_VERSION = "node-0.5.0";
 const HOP_LIMIT = 8;
@@ -173,6 +174,14 @@ export class Kernel {
     this._capsReady = false;
     this._round = null;
     this._openRunIds = new Map();
+    this.present = new PresentService({
+      bus: this.bus,
+      nodeName: this.cfg.node,
+      role: this.cfg.role || "node",
+      statePath: path.join(this.cfg.configDir, "present_state.json"),
+      queuePath: path.join(this.cfg.configDir, "present_queue.jsonl"),
+      log,
+    });
     this._hookBus();
     this.loadCommands();
   }
@@ -339,13 +348,24 @@ export class Kernel {
     this._remember(this.T.parts, this._asRow(fields, created));
   }
 
-  async writeMessage(task, kind, content, { role = "agent", toNode = "hub", inReplyTo = "", artifactRef = "", data = null, refTaskIds = "" } = {}) {
+  async initiatorOf(task) {
+    const taskId = f1(task, "Task_ID");
+    const msgs = await this.listMessages(taskId);
+    const instr = msgs.find((m) => f1(m, "Kind") === "instruction");
+    const from = instr ? String(f1(instr, "From_Node") ?? "").trim() : "";
+    if (from) return from;
+    const src = String(f1(task, "Source") ?? "").trim();
+    return src || "hub";
+  }
+
+  async writeMessage(task, kind, content, { role = "agent", toNode = "", inReplyTo = "", artifactRef = "", data = null, refTaskIds = "" } = {}) {
+    const resolvedTo = toNode || (kind === "auth_request" ? "hub" : (await this.initiatorOf(task)));
     const taskId = f1(task, "Task_ID");
     const seq = this.nextMsgSeq(await this.listMessages(taskId));
     const msgId = `MSG-${taskId.replace("TASK-", "")}-${String(seq).padStart(2, "0")}`;
     const fields = {
       Msg_ID: msgId, Task_ID: taskId, Context_ID: f1(task, "Context_ID"),
-      From_Node: this.cfg.node, To_Node: toNode, Role: role, Kind: kind,
+      From_Node: this.cfg.node, To_Node: resolvedTo, Role: role, Kind: kind,
       Artifact_Ref: artifactRef, In_Reply_To: inReplyTo, Created_At: nowShort(),
     };
     if (refTaskIds) fields.Ref_Task_IDs = refTaskIds;
@@ -1417,6 +1437,13 @@ export class Kernel {
     for (const t of tasks) {
       if (f1(t, "Target_Node") === this.cfg.node && f1(t, "Status") === "input-required") {
         await this.resumeCheck(t);
+      }
+    }
+    if (this.cfg.role !== "hub" && this.present) {
+      try {
+        await this.present.scan();
+      } catch (e) {
+        log("present scan error: " + (e?.message ?? e));
       }
     }
   }

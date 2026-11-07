@@ -89,7 +89,7 @@ export async function hubDoctor(configDir) {
       bad("结果呈递模块不可用");
       problems++;
     } else {
-      ok("结果呈递：completed / failed / rejected / input-required / auth-required 发给机主。去重键是 (Task_ID, Status_Msg)，终态再带上 Status，记在配置目录 present_state.json，不进仓库");
+      ok("结果呈递：归属于本节点或主节点的任务回执（completed / failed / rejected / input-required）写入 present_queue.jsonl 原路唤醒 Agent，去重键记在 present_state.json 与线上 Metadata");
     }
     if (typeof stale.StaleService !== "function") {
       bad("陈旧告警模块不可用");
@@ -136,7 +136,10 @@ export async function runHub(cfg, log = logLine) {
   const present = new PresentService({
     bus: cfg.bus,
     ownerOpenId,
+    nodeName: cfg.node,
+    role: "hub",
     statePath: path.join(cfg.configDir, "present_state.json"),
+    queuePath: path.join(cfg.configDir, "present_queue.jsonl"),
     log,
   });
   const stale = new StaleService({
