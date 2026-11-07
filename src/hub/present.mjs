@@ -1,0 +1,216 @@
+// hub 角色的结果呈递。把需要机主知道的状态发到机主私聊。
+// 去重键：中断态是 (Task_ID, Status_Msg)；终态再带上 Status。终态的 Status_Msg
+// 经常被清空，或仍指向旧的 question，只按消息号去重会把续跑后的结果吞掉。
+// 已发送的键写在配置目录的 present_state.json，不回写 Tasks，也不进仓库。
+// 调用方每次对账都扫全表做兜底；事件只是提前叫醒。
+
+import fs from "node:fs";
+import path from "node:path";
+import { f1 } from "../bus/feishu.mjs";
+import { messageText } from "./cards.mjs";
+
+const PRESENT_STATUSES = new Set([
+  "completed", "failed", "rejected", "input-required", "auth-required",
+]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "rejected"]);
+const MSG_KINDS = new Set([
+  "result", "question", "auth_request", "notice", "answer", "auth_decision",
+]);
+// 优先取和当前状态配套的那条消息。表的返回顺序不能当「最新」。
+const PREFERRED_KIND = {
+  completed: "result",
+  failed: "notice",
+  rejected: "notice",
+  "input-required": "question",
+  "auth-required": "auth_request",
+};
+const STATUS_LABEL = {
+  completed: "已完成",
+  failed: "失败",
+  rejected: "已拒收",
+  "input-required": "需要补充信息",
+  "auth-required": "待审批",
+};
+
+export function presentKey(taskId, status, statusMsg) {
+  const msg = statusMsg || "";
+  if (TERMINAL_STATUSES.has(status)) return `${taskId}\t${status}\t${msg}`;
+  return `${taskId}\t${msg}`;
+}
+
+function loadMeta(raw) {
+  // 坏 JSON 不当作已呈递，避免一格脏数据把新结果永久吞掉。
+  const text = typeof raw === "string" ? raw : (raw == null ? "" : String(raw));
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  try {
+    const obj = JSON.parse(trimmed);
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function metaKeys(task) {
+  const keys = loadMeta(f1(task, "Metadata")).presented_keys;
+  if (typeof keys === "string") return [keys];
+  if (Array.isArray(keys)) return keys.filter((k) => typeof k === "string");
+  return [];
+}
+
+function msgSeq(msg) {
+  const id = String(f1(msg, "Msg_ID") ?? "");
+  const matched = id.match(/-(\d+)$/);
+  return matched ? Number(matched[1]) : -1;
+}
+
+function compareMsg(a, b) {
+  const ds = msgSeq(a) - msgSeq(b);
+  if (ds !== 0) return ds;
+  const ca = String(f1(a, "Created_At") ?? "");
+  const cb = String(f1(b, "Created_At") ?? "");
+  if (ca < cb) return -1;
+  if (ca > cb) return 1;
+  const ia = String(f1(a, "Msg_ID") ?? "");
+  const ib = String(f1(b, "Msg_ID") ?? "");
+  return ia < ib ? -1 : ia > ib ? 1 : 0;
+}
+
+function latestMessage(messages, taskId, status) {
+  const rows = messages.filter((msg) => {
+    return String(f1(msg, "Task_ID") ?? "") === String(taskId) && MSG_KINDS.has(f1(msg, "Kind"));
+  });
+  const preferred = PREFERRED_KIND[status];
+  const pool = preferred ? rows.filter((msg) => f1(msg, "Kind") === preferred) : [];
+  const chosen = (pool.length ? pool : rows).slice().sort(compareMsg);
+  return chosen.length ? chosen[chosen.length - 1] : null;
+}
+
+function clip(text, limit) {
+  const value = String(text ?? "").trim();
+  if (value.length <= limit) return value;
+  return value.slice(0, limit).trimEnd() + "…";
+}
+
+function runOf(runs, task) {
+  const latest = String(f1(task, "Latest_Run") ?? "");
+  if (latest) {
+    const hit = runs.find((row) => String(f1(row, "Run_ID") ?? "") === latest);
+    if (hit) return hit;
+  }
+  const taskId = String(f1(task, "Task_ID") ?? "");
+  const mine = runs.filter((row) => String(f1(row, "Task_Ref") ?? "") === taskId);
+  return mine.length ? mine[mine.length - 1] : null;
+}
+
+export function presentBody({ taskId, title, status, statusMsg, target, message, outcome, error }) {
+  const lines = [
+    `【任务${STATUS_LABEL[status] || status}】`,
+    `任务：${title || "-"}`,
+    `编号：${taskId}`,
+    `状态：${status}`,
+    `目标节点：${target || "-"}`,
+  ];
+  if (statusMsg) lines.push(`状态消息：${statusMsg}`);
+  if (message) lines.push("", clip(message, 2000));
+  if (outcome) lines.push("", "执行结果：" + clip(outcome, 500));
+  if (error) lines.push("错误：" + clip(error, 500));
+  return lines.join("\n").slice(0, 3500);
+}
+
+function readState(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const keys = Array.isArray(parsed?.keys) ? parsed.keys.filter((k) => typeof k === "string") : [];
+    return { keys };
+  } catch (e) {
+    if (e.code === "ENOENT") return { keys: [] };
+    // 读坏了就当没有发过。重发一次好过把新结果永久吞掉。
+    return { keys: [], broken: e.message };
+  }
+}
+
+function writeState(file, state) {
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ keys: state.keys }, null, 1), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  fs.chmodSync(file, 0o600);
+}
+
+export class PresentService {
+  constructor({ bus, ownerOpenId = "", statePath, log }) {
+    this.bus = bus;
+    this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.statePath = statePath;
+    this.log = log ?? (() => {});
+  }
+
+  async scan() {
+    const owner = String(this.ownerOpenId ?? "").trim();
+    if (!owner) {
+      this.log("hub 未配置机主 open_id，跳过结果呈递");
+      return 0;
+    }
+    if (!this.statePath) {
+      this.log("结果呈递没有状态文件路径，本轮跳过，避免无法去重仍发消息");
+      return 0;
+    }
+    const state = readState(this.statePath);
+    if (state.broken) {
+      this.log("present_state.json 读失败，本轮按未呈递处理：" + state.broken);
+    }
+    const seen = new Set(state.keys);
+    const tasks = await this.bus.listRecords(this.bus.tables.tasks);
+    const pending = [];
+    for (const task of tasks) {
+      const status = String(f1(task, "Status") ?? "");
+      if (!PRESENT_STATUSES.has(status)) continue;
+      const taskId = String(f1(task, "Task_ID") ?? "");
+      if (!taskId) continue;
+      const statusMsg = String(f1(task, "Status_Msg") ?? "");
+      const key = presentKey(taskId, status, statusMsg);
+      if (seen.has(key) || metaKeys(task).includes(key)) continue;
+      pending.push({ task, taskId, status, statusMsg, key });
+    }
+    if (!pending.length) return 0;
+    const messages = await this.bus.listRecords(this.bus.tables.messages);
+    const parts = await this.bus.listRecords(this.bus.tables.parts);
+    const runs = await this.bus.listRecords(this.bus.tables.runs);
+    let sent = 0;
+    for (const item of pending) {
+      const msg = latestMessage(messages, item.taskId, item.status);
+      const run = runOf(runs, item.task);
+      const text = presentBody({
+        taskId: item.taskId,
+        title: String(f1(item.task, "Title") ?? ""),
+        status: item.status,
+        statusMsg: item.statusMsg,
+        target: String(f1(item.task, "Target_Node") ?? ""),
+        message: msg ? messageText(parts, f1(msg, "Msg_ID")) : "",
+        outcome: run ? String(f1(run, "Outcome") ?? "") : "",
+        error: run ? String(f1(run, "Error_Log") ?? "") : "",
+      });
+      try {
+        await this.bus.sendMessage(owner, "text", { text });
+      } catch (e) {
+        // 没发出去就不记键，下一轮对账再试。
+        this.log("呈递失败 " + item.taskId + "：" + (e?.message ?? e));
+        continue;
+      }
+      if (!seen.has(item.key)) {
+        seen.add(item.key);
+        state.keys.push(item.key);
+      }
+      try {
+        writeState(this.statePath, state);
+      } catch (e) {
+        this.log("present_state.json 写失败，这条可能在下一轮重发：" + (e?.message ?? e));
+      }
+      sent += 1;
+      this.log("presented " + item.taskId + " " + item.status);
+    }
+    return sent;
+  }
+}

@@ -1,8 +1,45 @@
 # Changelog
 
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
-`hub-node --version`；中台标准版本独立编号（现行 v3.0）。
+`hub-node --version`；中台标准版本独立编号（现行 v3.1）。
 
+## [Unreleased]
+
+- 仓库只保留 Node。删除 `hub/` 下的 Python 枢纽（含接收端、呈递扫描、审批发卡、systemd 单元与自愈脚本）和 `schema/generate_schema.py`。Base 结构生成器改为 `schema/generate_schema.mjs`（Node >= 20、全局 `fetch`，不新增依赖）；生成物页眉字符串未改，以便与现有 `schema/base-schema.json`、`docs/base-schema.md` 逐字节一致。
+- `hub-node daemon` 省略 `--role` 时与 doctor、service 一样：先读配置目录 `node.json` 的 `role`，缺省 node。
+- `hub-node task create` 为现行建单入口（先写 instruction 与 Parts，最后写 Tasks 行）。Rules 自动路由仍为计划。hub 角色的呈递、审批与陈旧告警由 `src/hub/` 在同一守护进程里完成，状态文件在配置目录（`approval_state.json`、`present_state.json`、`stale_state.json`）。
+- 中台标准 v3.1（hub 与 node 合一、统一传输方式；表结构不变，只改文档，
+  实现在后续阶段跟进）：
+  - §0：新增第 6 条，hub 是逻辑角色，不是独立进程或独立实现；第 3 条
+    「只出不进」写明 webhook 只指出站通知，本项目不提供入站端点，与 §6
+    Receive_Mode 枚举对齐。
+  - §10.1（新增）：定义 node / hub 两个角色；hub 职责为建单（instruction
+    消息 → Parts → Tasks 行，入口 `hub-node task create`）、发审批卡、
+    回调校验机主、写 auth_decision（From_Node=hub、Role=user、
+    In_Reply_To=当前 Status_Msg）、写 canceled、结果呈递、陈旧任务告警。
+    原有枢纽约束不变，改由 hub 角色承担；角色边界：node 角色从不写
+    auth_decision 与 canceled，hub 角色是唯一写方。一台机器要同时承担
+    两角色就起两个守护进程、各用一个配置目录。hub 角色强制长连接
+    （审批卡回调只能经长连接送达），node 角色可选 ws / poll。
+  - §10.2（新增）：应用身份默认 hub 与 node 两个应用（身份隔离），也可
+    共用一个应用，并写明代价（审计不可区分、权限并集、凭据泄露可冒写
+    hub 决定、吊销联动）。
+  - §10.3（新增）：唤醒方式定为 ws（SDK 长连接，出站）、poll（默认 45
+    秒）、webhook 三种——webhook 专指飞书多维表格自动化 POST 通知（只带
+    ID，Receive_Mode 统一记 `automation`，遗留选项 `webhook` 不再使用；
+    本项目任何进程不主动推送），均保留 15 分钟对账兜底；Receive_Mode
+    沿用现有选项，ws 记为 `event`，守护进程型节点只取 `event` / `poll`。
+  - §2 canceled、§3 唤醒语义、§6 Receive_Mode、§8.3 写入方、§9 节点传输
+    随之改写。
+- hub 角色由 `hub-node daemon --role hub` 承载，代码在 `src/hub/` 与
+  `src/transport/`。省略 `--role` 时读 `node.json` 的 `role`，缺省 node。
+- 装机与运维角色适配（任务 E）：
+  - `hub-node setup` 支持 `--role node|hub`（默认 node）：hub 角色收集机主 `ownerOpenId`（用于审批发卡与回调鉴权），无需 `commands.json`；尝试调用 `lark-cli` 自动完成云文档事件订阅注册，未就绪时给出清晰的一次性手动注册步骤。凭据写 600 权限的 `app.env`，不打印明文。
+  - `hub-node doctor` 支持 `--role node|hub` 按角色检查：打印当前角色与唤醒方式；hub 角色不要求 `commands.json`，校验长连接模块与机主配置。
+  - `hub-node service` 支持 `--role node|hub`：自启命令显式透传 `--role`，macOS（`hub-node-${role}.${node}`）与 Linux（`hub-node-${role}-${node}.service`）按角色命名服务，支持单机同时部署 hub 与 node 互不覆盖。
+  - 上手指南与文档精简（README.md / CONTRIBUTING.md / install.sh）：README 上手部分重构为「加入现成中台（装 node）」与「自建中台（单机起 hub + node 双角色）」两条精简路径（各约 3 步），新增外部 bot 经飞书自动化 webhook 接入说明。
+- 同步更新 `docs/architecture.md`、`docs/hub-integration.md`、`DESIGN.md`
+  （§6 唤醒、§11 仓库结构）、`AGENTS.md`、`README.md`。
 ## [0.5.0] - 2026-11-05
 
 - 中台标准 v3.0 补订（第二评审收敛，表结构不变；见

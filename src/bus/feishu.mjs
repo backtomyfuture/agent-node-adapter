@@ -96,6 +96,21 @@ export class FeishuBus {
   updateRecord(table, recordId, fields) {
     return this.api("PUT", `/bitable/v1/apps/${this.baseToken}/tables/${table}/records/${recordId}`, { fields });
   }
+
+  // 发 IM 消息。content 可以是对象，这里会先变成飞书要求的 JSON 字符串。
+  // 只给 hub 角色发卡用；节点认领路径不调用。
+  sendMessage(receiveId, msgType, content, receiveIdType = "open_id") {
+    const q = "receive_id_type=" + encodeURIComponent(receiveIdType);
+    return this.api("POST", `/im/v1/messages?${q}`, {
+      receive_id: receiveId,
+      msg_type: msgType,
+      content: typeof content === "string" ? content : JSON.stringify(content),
+    });
+  }
+
+  sendCard(openId, card) {
+    return this.sendMessage(openId, "interactive", card, "open_id");
+  }
 }
 
 // 飞书字段值常为单元素数组，取标量。

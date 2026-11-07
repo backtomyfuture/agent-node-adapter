@@ -1,0 +1,294 @@
+// hub 角色的审批中继（标准 §8.3）。
+// 扫 auth-required → 给机主发一张卡；卡片回调先核对操作者是机主，
+// 写之前再回读任务，确认仍是 auth-required 且 Status_Msg 没变。
+// 通过后按「消息 → Parts → 任务行」写 auth_decision，批准回 submitted，驳回置 canceled 并写 notice。
+// 写操作经调用方逐条 await；本模块用一条队列串行回调，避免两张卡同时改同一张表。
+
+import fs from "node:fs";
+import path from "node:path";
+import { f1 } from "../bus/feishu.mjs";
+import { buildCard } from "./cards.mjs";
+
+function toast(type, content) {
+  return { toast: { type, content, i18n: { zh_cn: content } } };
+}
+
+function dig(obj, name) {
+  if (obj == null || typeof obj !== "object") return undefined;
+  return obj[name];
+}
+
+export function operatorOpenId(data) {
+  const event = dig(data, "event") ?? data;
+  const operator = dig(event, "operator") ?? dig(data, "operator");
+  const openId = dig(operator, "open_id") ?? dig(operator, "openId");
+  return String(openId ?? "").trim();
+}
+
+export function actionValue(data) {
+  const event = dig(data, "event") ?? data;
+  const action = dig(event, "action") ?? dig(data, "action");
+  let value = dig(action, "value");
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return {}; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+
+function nowMinute() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function msgSeq(msg) {
+  const id = String(f1(msg, "Msg_ID") ?? "");
+  const matched = id.match(/-(\d+)$/);
+  return matched ? Number(matched[1]) : -1;
+}
+
+// 用已有最大序号 + 1。按条数 + 1 会在缺号时撞上已有 Msg_ID。
+function nextMsgId(taskId, msgs) {
+  let max = 0;
+  for (const msg of msgs) {
+    const n = msgSeq(msg);
+    if (n > max) max = n;
+  }
+  const seq = max + 1;
+  return `MSG-${String(taskId).replace("TASK-", "")}-${String(seq).padStart(2, "0")}`;
+}
+
+function bumpMsgId(msgId) {
+  const matched = String(msgId).match(/^(.*-)(\d+)$/);
+  if (!matched) return msgId;
+  return matched[1] + String(Number(matched[2]) + 1).padStart(matched[2].length, "0");
+}
+
+export class ApprovalService {
+  constructor({ bus, ownerOpenId = "", statePath, log, now = nowMinute }) {
+    this.bus = bus;
+    this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.statePath = statePath;
+    this.log = log ?? (() => {});
+    this.now = now;
+    this._tail = Promise.resolve();
+  }
+
+  enqueue(fn) {
+    const run = this._tail.then(fn, fn);
+    this._tail = run.then(() => {}, () => {});
+    return run;
+  }
+
+  loadState() {
+    if (!this.statePath) return {};
+    try {
+      return JSON.parse(fs.readFileSync(this.statePath, "utf8"));
+    } catch (e) {
+      if (e.code === "ENOENT") return {};
+      this.log("approval_state.json 读失败，本轮不发卡，避免把已发出的卡整批重发：" + e.message);
+      return null;
+    }
+  }
+
+  saveState(state) {
+    if (!this.statePath) return;
+    const dir = path.dirname(this.statePath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = this.statePath + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 1), { mode: 0o600 });
+    fs.renameSync(tmp, this.statePath);
+    fs.chmodSync(this.statePath, 0o600);
+  }
+
+  alreadySent(state, recordId, statusMsg) {
+    const row = state?.[recordId];
+    return !!(row?.card_sent && row.status_msg === statusMsg);
+  }
+
+  // 没有待发卡的任务就不拉 Messages/Parts。每成功一张立刻落盘。
+  async scan() {
+    const owner = String(this.ownerOpenId ?? "").trim();
+    if (!owner) {
+      this.log("hub 未配置机主 open_id，跳过审批发卡");
+      return 0;
+    }
+    const state = this.loadState();
+    if (state == null) return 0;
+    const tasks = await this.bus.listRecords(this.bus.tables.tasks);
+    const pending = [];
+    for (const task of tasks) {
+      if (f1(task, "Status") !== "auth-required") continue;
+      const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+      if (!statusMsg) {
+        this.log("skip card: " + f1(task, "Task_ID") + " Status_Msg 为空，不发无法对上决定的卡");
+        continue;
+      }
+      if (this.alreadySent(state, task.record_id, statusMsg)) continue;
+      pending.push(task);
+    }
+    if (!pending.length) return 0;
+    const messages = await this.bus.listRecords(this.bus.tables.messages);
+    const parts = await this.bus.listRecords(this.bus.tables.parts);
+    let sent = 0;
+    for (const task of pending) {
+      const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+      const res = await this.bus.sendCard(owner, buildCard(task, messages, parts));
+      state[task.record_id] = {
+        card_sent: true,
+        message_id: res?.message_id ?? "",
+        status_msg: statusMsg,
+      };
+      this.saveState(state);
+      sent += 1;
+      this.log("card sent for " + f1(task, "Task_ID"));
+    }
+    return sent;
+  }
+
+  handleCardAction(data) {
+    return this.enqueue(() => this._handle(data));
+  }
+
+  async _handle(data) {
+    try {
+      return await this._decide(data);
+    } catch (e) {
+      this.log("card action error: " + (e?.message ?? e));
+      return toast("error", "处理失败：" + String(e?.message ?? e).slice(0, 100));
+    }
+  }
+
+  async _decide(data) {
+    const owner = String(this.ownerOpenId ?? "").trim();
+    const operator = operatorOpenId(data);
+    if (!owner) {
+      this.log("WARN card action rejected: owner open_id is unset");
+      return toast("error", "未配置机主，已拒绝。");
+    }
+    if (operator !== owner) {
+      this.log("WARN card action rejected: operator is not owner");
+      return toast("error", "只有机主可以审批。");
+    }
+    const value = actionValue(data);
+    const recordId = String(value.record_id ?? "").trim();
+    const decision = String(value.decision ?? "").trim();
+    const cardTaskId = String(value.task_id ?? "").trim();
+    const cardStatusMsg = String(value.status_msg ?? "").trim();
+    if (!recordId) return toast("error", "卡片缺少任务记录，已拒绝。");
+    if (decision !== "approve" && decision !== "reject") {
+      return toast("error", "无法识别的审批决定，已拒绝。");
+    }
+    if (!cardStatusMsg) return toast("error", "卡片缺少所批的 Status_Msg，已拒绝。");
+
+    const preview = await this.readFresh(recordId, cardTaskId, cardStatusMsg);
+    if (!preview.ok) return toast(preview.type, preview.content);
+
+    const taskId = f1(preview.task, "Task_ID");
+    const messages = (await this.bus.listRecords(this.bus.tables.messages))
+      .filter((msg) => f1(msg, "Task_ID") === taskId);
+    // 列表和第一笔写之间再读一次。过期卡在这里被拒绝，不会留下 auth_decision。
+    const fresh = await this.readFresh(recordId, cardTaskId, cardStatusMsg);
+    if (!fresh.ok) return toast(fresh.type, fresh.content);
+    const task = fresh.task;
+    const statusMsg = fresh.statusMsg;
+    const decisionId = nextMsgId(taskId, messages);
+    await this.writeDecision(task, decisionId, statusMsg, decision);
+    if (decision === "reject") {
+      await this.writeNotice(task, bumpMsgId(decisionId), statusMsg);
+    }
+
+    const again = await this.readFresh(recordId, cardTaskId, cardStatusMsg);
+    if (!again.ok) {
+      this.log("card action: 决定消息已写入，但任务在落状态前变化，不再改任务行 " + taskId);
+      return toast("info", "任务状态已变化或审批已过期，未改任务状态。");
+    }
+    if (decision === "approve") {
+      // 保留 Status_Msg，节点认领前用它核对 In_Reply_To。清 Presented，这一态才能再呈递。
+      await this.bus.updateRecord(this.bus.tables.tasks, recordId, {
+        Status: "submitted",
+        Presented: "",
+        Status_Msg: statusMsg,
+      });
+      return toast("success", "已批准，任务重新入队执行。");
+    }
+    await this.bus.updateRecord(this.bus.tables.tasks, recordId, {
+      Status: "canceled",
+      Presented: "",
+    });
+    return toast("info", "已驳回，任务取消。");
+  }
+
+  async readFresh(recordId, cardTaskId, cardStatusMsg) {
+    const task = await this.bus.getRecord(this.bus.tables.tasks, recordId);
+    if (!task) return { ok: false, type: "error", content: "任务不存在，已拒绝。" };
+    const taskId = String(f1(task, "Task_ID") ?? "");
+    if (cardTaskId && taskId !== cardTaskId) {
+      this.log("WARN card action rejected: task_id does not match record");
+      return { ok: false, type: "error", content: "卡片与任务编号不一致，已拒绝。" };
+    }
+    const status = String(f1(task, "Status") ?? "");
+    const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+    if (status !== "auth-required" || statusMsg !== cardStatusMsg) {
+      this.log("WARN card action rejected: stale card for " + (taskId || recordId));
+      return { ok: false, type: "info", content: "任务状态已变化或审批已过期，未处理。" };
+    }
+    return { ok: true, task, statusMsg };
+  }
+
+  async writeDecision(task, msgId, statusMsg, decision) {
+    const text = decision === "approve"
+      ? "approved：操作者已在审批卡批准。"
+      : "rejected：操作者已在审批卡驳回。";
+    await this.bus.createRecord(this.bus.tables.messages, {
+      Msg_ID: msgId,
+      Task_ID: f1(task, "Task_ID"),
+      Context_ID: f1(task, "Context_ID"),
+      From_Node: "hub",
+      To_Node: f1(task, "Target_Node"),
+      Role: "user",
+      Kind: "auth_decision",
+      In_Reply_To: statusMsg,
+      Created_At: this.now(),
+    });
+    await this.bus.createRecord(this.bus.tables.parts, {
+      Part_ID: msgId + "-P1",
+      Parent_ID: msgId,
+      Parent_Type: "message",
+      Seq: 1,
+      Kind: "text",
+      Text: text,
+    });
+    await this.bus.createRecord(this.bus.tables.parts, {
+      Part_ID: msgId + "-P2",
+      Parent_ID: msgId,
+      Parent_Type: "message",
+      Seq: 2,
+      Kind: "data",
+      Data: JSON.stringify({ decision }),
+    });
+  }
+
+  async writeNotice(task, msgId, statusMsg) {
+    await this.bus.createRecord(this.bus.tables.messages, {
+      Msg_ID: msgId,
+      Task_ID: f1(task, "Task_ID"),
+      Context_ID: f1(task, "Context_ID"),
+      From_Node: "hub",
+      To_Node: f1(task, "Target_Node"),
+      Role: "agent",
+      Kind: "notice",
+      In_Reply_To: statusMsg,
+      Created_At: this.now(),
+    });
+    await this.bus.createRecord(this.bus.tables.parts, {
+      Part_ID: msgId + "-P1",
+      Parent_ID: msgId,
+      Parent_Type: "message",
+      Seq: 1,
+      Kind: "text",
+      Text: "机主已在审批卡驳回，任务取消。",
+    });
+  }
+}

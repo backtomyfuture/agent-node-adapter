@@ -5,8 +5,10 @@ node_modules/
 __pycache__/
 
 # 运行时与凭据（只存本机，绝不进仓库）
-hub/hub.env
-hub/present_queue.jsonl
-hub/approval_state.json
+# hub 角色把状态写在配置目录（默认 ~/.hub-node，或 --config 指向的目录）。
+# 这些文件名若落在仓库里也不提交。
 .hub-node/
 app.env
+approval_state.json
+present_state.json
+stale_state.json

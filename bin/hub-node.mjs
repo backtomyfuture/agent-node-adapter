@@ -2,7 +2,10 @@
 // hub-node —— 通用节点适配器命令行入口。
 // 子命令：
 //   setup    一键配置向导：装/复用 lark-cli、发现 Base 表、写配置、自检、自启
-//   daemon   常驻守护进程（认领 → 拉起 → 回执 → 落日志）
+//   daemon   常驻守护进程。--role node 认领执行；--role hub 做审批、呈递、陈旧告警。
+//            省略 --role 时读 node.json 的 role，再缺省 node。
+//            没有 both：一台机器要同时当两边，就起两个进程，各用一个 --config。
+//   task     task create：hub 角色建单。先写 instruction 与 Parts，最后写 Tasks 行。
 //   doctor   本机自检：配置、凭据、总线连通、能力登记、自启状态（M3）
 //            --probe <host:port> 经在线 carrier 做一次只读 TCP 探测
 //   service  注册/卸载开机自启：macOS launchd / Linux systemd 用户级（M3）
@@ -24,6 +27,43 @@ function configDirFrom(argv) {
   if (i >= 0 && argv[i + 1]) return argv[i + 1];
   if (process.env.HUB_NODE_HOME) return process.env.HUB_NODE_HOME;
   return path.join(os.homedir(), ".hub-node");
+}
+
+// 命令行写了 --role 就取出；没写返回 undefined。非法值抛错，不静默当成 node。
+function specifiedRole(argv) {
+  let value;
+  let seen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--role") {
+      seen = true;
+      value = argv[i + 1] ?? "";
+      i++;
+    } else if (arg.startsWith("--role=")) {
+      seen = true;
+      value = arg.slice("--role=".length);
+    }
+  }
+  if (!seen) return undefined;
+  if (value !== "node" && value !== "hub") {
+    throw new Error(`--role 只能是 node 或 hub，收到：${value || "(空)"}`);
+  }
+  return value;
+}
+
+// daemon / doctor / service 共用：命令行 --role 优先。
+// 省略时读 node.json 的 role，没有该字段或读不到配置再缺省 node。
+// 不能把「省略」先写成 node 再传给 service：那会盖掉 node.json 里的 hub，
+// 自启单元渲染成 --role node，doctor 也会跳过 hub 检查。
+function roleForTool(argv) {
+  const specified = specifiedRole(argv);
+  if (specified) return specified;
+  try {
+    const file = path.join(configDirFrom(argv), "node.json");
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (raw.role === "hub" || raw.role === "node") return raw.role;
+  } catch { /* 读不到配置就按 node，doctor 会再报配置失败 */ }
+  return "node";
 }
 
 function probeTargetFrom(argv) {
@@ -115,9 +155,16 @@ if (cmd === "setup") {
   const { runSetup } = await import("../src/setup.mjs");
   process.exitCode = await runSetup(configDirFrom(rest), rest, APP_DIR);
 } else if (cmd === "daemon") {
+  let role;
+  try {
+    role = roleForTool(rest);
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
   let release;
   const onSignal = (signal) => process.exit(signal === "SIGINT" ? 130 : 143);
-  try {
+  if (role) try {
     const configDir = path.resolve(configDirFrom(rest));
     release = acquireDaemonLock(configDir);
     process.once("exit", release);
@@ -134,7 +181,12 @@ if (cmd === "setup") {
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
       process.exitCode = 1;
     }
-    if (cfg) await new Kernel(cfg).run();
+    if (cfg && role === "hub") {
+      const { runHub } = await import("../src/hub/index.mjs");
+      await runHub(cfg);
+    } else if (cfg) {
+      await new Kernel(cfg).run();
+    }
   } catch (e) {
     console.error("daemon 启动失败：" + e.message);
     process.exitCode = 1;
@@ -147,22 +199,75 @@ if (cmd === "setup") {
     }
   }
 } else if (cmd === "doctor") {
-  const { doctor } = await import("../src/doctor.mjs");
-  process.exitCode = await doctor(configDirFrom(rest), APP_DIR, { probe: probeTargetFrom(rest) });
+  let role;
+  try {
+    role = roleForTool(rest);
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
+  if (role) {
+    const { doctor } = await import("../src/doctor.mjs");
+    let code = await doctor(configDirFrom(rest), APP_DIR, { probe: probeTargetFrom(rest), role });
+    if (role === "hub") {
+      const { hubDoctor } = await import("../src/hub/index.mjs");
+      const extra = await hubDoctor(configDirFrom(rest));
+      if (extra) code = 1;
+    }
+    process.exitCode = code;
+  }
 } else if (cmd === "host") {
   const { startCarrier } = await import("../src/carrier.mjs");
   process.exitCode = await startCarrier(configDirFrom(rest));
 } else if (cmd === "service") {
-  const { service } = await import("../src/service.mjs");
-  process.exitCode = await service(configDirFrom(rest), { remove: rest.includes("--remove") }, APP_DIR);
+  let role;
+  try {
+    role = roleForTool(rest);
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
+  if (role) {
+    const { service } = await import("../src/service.mjs");
+    process.exitCode = await service(configDirFrom(rest), { remove: rest.includes("--remove"), role }, APP_DIR);
+  }
+} else if (cmd === "task") {
+  const sub = rest[0];
+  if (sub !== "create") {
+    console.error("用法：hub-node task create --config <dir> --to <node> --cap <cap_id> [--text <指令>] [--params <json 或 @文件>] [--context <Context_ID>] [--ref <Task_ID,...>] [--approval approve|notify|auto]");
+    process.exitCode = 1;
+  } else {
+    try {
+      const { parseCreateArgv, parseParams, createTask } = await import("../src/hub/create.mjs");
+      const args = parseCreateArgv(rest.slice(1));
+      // 控制键在读凭据、写表之前拒绝。
+      parseParams(args.paramsRaw);
+      const cfg = loadConfig(args.configDir || configDirFrom(rest));
+      const taskId = await createTask({
+        bus: cfg.bus,
+        to: args.to,
+        cap: args.cap,
+        text: args.text,
+        params: args.paramsRaw,
+        context: args.context,
+        ref: args.ref,
+        approval: args.approval,
+      });
+      console.log(taskId);
+    } catch (e) {
+      console.error(e?.message ?? e);
+      process.exitCode = 1;
+    }
+  }
 } else if (cmd === "--version" || cmd === "-v") {
   console.log(DAEMON_VERSION);
 } else {
   console.log(`hub-node ${DAEMON_VERSION}
 用法：
-  hub-node setup   [--config <dir>]    一键配置向导（首次装机跑这个）
-  hub-node daemon  [--config <dir>]    常驻守护进程
-  hub-node doctor  [--config <dir>] [--probe <host:port>]  本机自检
-  hub-node service [--config <dir>]    注册开机自启（--remove 卸载）
-  hub-node host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）`);
+  hub-node setup   [--config <dir>] [--role node|hub]  一键配置向导（首次装机跑这个）
+  hub-node daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
+  hub-node doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
+  hub-node service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
+  hub-node host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）
+  hub-node task create --config <dir> --to <node> --cap <cap_id> [--text <指令>] [--params <json 或 @文件>] [--context <Context_ID>] [--ref <Task_ID,...>] [--approval approve|notify|auto]`);
 }

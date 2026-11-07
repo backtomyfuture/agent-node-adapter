@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FeishuBus, f1 } from "./bus/feishu.mjs";
-import { FeishuEventReceiver } from "./bus/feishu-events.mjs";
+import { createWaker } from "./transport/index.mjs";
 import { execViaCarrier, pingCarrier, runDetachedCommand } from "./carrier.mjs";
 
 export const DAEMON_VERSION = "node-0.5.0";
@@ -147,6 +147,8 @@ export function loadConfig(configDir) {
     doorbellFile: cfg.doorbellFile ? cfg.doorbellFile.replace(/^~/, os.homedir()) : null,
     carrierSocket: cfg.carrierSocket ? cfg.carrierSocket.replace(/^~/, os.homedir()) : path.join(configDir, "carrier.sock"),
     capPrefix: cfg.capPrefix ?? cfg.node,
+    // 缺省 undefined。hub 角色由传输层强制走长连接；不在这里把缺省改写成 node，避免和角色改造抢字段语义。
+    role: cfg.role,
     bus: new FeishuBus({ appId, appSecret, baseToken: cfg.baseToken, tables: cfg.tables }),
     configDir,
   };
@@ -1367,48 +1369,23 @@ export class Kernel {
     }
   }
 
-  // 唤醒等待：飞书事件订阅（长连接）为主通道，事件一到立刻扫表；
-  // doorbellFile 增长（同机其他接收端收到事件时）同样唤醒；
-  // 两者都不可用时退回 pollSec 间隔轮询。等满 sweepSec 必做一次对账扫表，
-  // 因为事件断线不补发——对账是安全网，不是主通道。
+  // 唤醒等待交给当前传输的唤醒器。节奏与原来相同：长连接或门铃文件可用时
+  // 上限是 sweepSec，否则 pollSec；等满仍返回，因为事件断线不补发，对账是安全网。
   async waitWake() {
     // 注意：不在此处清 _wakeFlag。清零点在主循环扫表之前（见 run()）：
     // 扫表期间到达的事件必须保留到这里，让下一轮立刻再扫一次，
     // 否则「事件比任务行先落库」时唤醒会被清掉、只能等对账兜底。
-    const size = () => {
-      if (!this.cfg.doorbellFile) return -1;
-      try { return fs.statSync(this.cfg.doorbellFile).size; } catch { return -1; }
-    };
-    const start = size();
-    const eventDriven = this._wsUp || start >= 0;
-    const maxWait = (eventDriven ? this.cfg.sweepSec : this.cfg.pollSec) * 1000;
-    let waited = 0;
-    while (waited < maxWait) {
-      await new Promise((res) => setTimeout(res, 1000));
-      waited += 1000;
-      if (this._wakeFlag) {
-        log("event: waking");
-        return;
-      }
-      if (this.cfg.doorbellFile && size() !== start) {
-        log("doorbell: event arrived, waking");
-        return;
-      }
-    }
+    await this.waker.wait(() => this._wakeFlag);
   }
 
   startEventReceiver() {
-    if (!this.cfg.events) return;
-    const receiver = new FeishuEventReceiver({
-      appId: this.bus.appId,
-      appSecret: this.bus.appSecret,
-      baseToken: this.bus.baseToken,
-      doorbellFile: this.cfg.doorbellFile,
-      onEvent: () => { this._wakeFlag = true; },
+    this.waker?.stop();
+    this.waker = createWaker(this.cfg, {
+      extraHandlers: this.cfg.extraHandlers ?? {},
       onStatus: (up) => { this._wsUp = up; },
       log,
     });
-    receiver.start();
+    this.waker.start(() => { this._wakeFlag = true; });
   }
 
   async sweepOnce() {

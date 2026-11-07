@@ -55,7 +55,12 @@
 
 - 总线是可插拔后端接口；**飞书多维表格为一号后端**：零服务器、表即总线，读者不需要自建数据库与消息队列。
 - 数据模型沿用中台现行标准（A2A 形状）：任务八态（submitted / working / input-required / auth-required / completed / failed / canceled / rejected）、沟通与状态分离（消息只追加）、产物独立登记、能力以 AgentCard 形式自注册。
-- 唤醒：优先事件订阅（长连接推送）＋低频对账兜底；仅在后端不支持事件时退化为轮询。
+- 唤醒（标准 v3.1 §10.3）只有三种方式，都只是门铃，内容一律回表拉取：
+  - `ws`：飞书 SDK 长连接事件订阅（出站连接，现有实现，事件不解析内容）；
+  - `poll`：定时扫表（现有实现，默认 45 秒），用于无法订阅事件时；
+  - `webhook`：专指飞书多维表格自动化在 Tasks 行写入后向协议接入型节点的端点 POST，只带 ID 不带正文；发起 POST 的是飞书自动化，本项目进程绝不开监听端口、也不主动推送，守护进程自身只用 ws 或 poll。
+- 三种方式都保留低频对账扫表兜底（默认 15 分钟）。
+- 角色（标准 v3.1 §10.1）：hub 是逻辑角色，不是独立进程。以 `hub-node daemon --role node|hub`（默认 node）承载；一台机器要同时当 hub 与 node，起两个守护进程、各用一个配置目录（--config）。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一写方。
 
 ## 7. 能力模型与回执约定
 
@@ -95,18 +100,30 @@
 - 异二（常驻）：它活在用户会话里（无守护进程化，也因此没遇到局域网拦截）；我们要求无人值守自启常驻，由此多出 §9 一整章与 context 抽象。
 - 异三（能力分层）：我们显式区分脚本技能 / Agent+Skill / 通用能力三层，路由凭能力名片而非人工规则表。
 
-## 11. 仓库结构（草案）
+## 11. 仓库结构
+
+现状（Rules 自动路由仍为计划，不在本树里单列）：
 
 ```
-node-adapter/
-  bin/            # CLI 入口（daemon / host(carrier) / doctor(自检) / install）
-  src/kernel/     # 协议状态机（认领/心跳/回执/熔断/对账）
-  src/bus/        # 总线后端接口 + feishu 实现
-  src/executors/  # 官方插件（异步型工具适配）
-  src/contexts/   # direct / carrier / tmux / herdr
-  config/         # 配置样例（能力声明、命令模板）
-  install/        # curl 安装脚本 + launchd/systemd 注册
-  DESIGN.md       # 本文档
+lark-a2a-hub/
+  bin/hub-node.mjs      # CLI：setup / daemon / doctor / service / host / task
+                        #   支持 --role node|hub；task create 建单
+                        #   省略 --role 时读 node.json 的 role，缺省 node
+  src/kernel.mjs        # node 角色的协议状态机（认领/心跳/回执/熔断/对账）
+  src/bus/              # feishu.mjs（Bitable REST）、feishu-events.mjs（ws 长连接门铃）
+  src/carrier.mjs       # carrier 语境（unix socket 上的 NDJSON）
+  src/setup.mjs         # 装机向导（支持 --role node|hub，hub 配置机主 open_id）
+  src/doctor.mjs        # 只读自检（按角色检查，打印角色与唤醒方式）
+  src/service.mjs       # launchd / systemd 用户级自启（带 --role，hub/node 独立服务名）
+  src/executors/        # 示例执行器（echo.mjs）
+  src/hub/              # hub 角色（建单、审批发卡、卡片回调与机主校验、
+                        #   auth_decision、canceled、结果呈递、陈旧告警）
+  src/transport/        # ws / poll 门铃与对账定时（webhook 通知由飞书自动化发出）
+  config/               # 配置样例（只放占位符）
+  docs/                 # 中台标准、架构、hub 对接、协议节点手册、Base 结构（生成物）
+  schema/               # base-schema.json（生成物）与 generate_schema.mjs
+  install.sh            # curl 一行安装
+  DESIGN.md             # 本文档
   README.md
 ```
 
@@ -144,8 +161,8 @@ node-adapter/
 ## 13. 已定事项
 
 - 项目名 lark-a2a-hub；License MIT；Node 版本下限 20（跟随 LTS）。
-- 开源范围（2026-11-05 扩大）：节点适配器＋中台标准与全部设计文档＋
-  枢纽参考实现，一并公开（见 `docs/` 与 `hub/`）。
+- 开源范围（2026-11-05 扩大，2026-11-06 起仓库只保留 Node）：节点适配器＋
+  中台标准与全部设计文档＋ hub 角色（`src/hub/`），一并公开。
 
 ## 实施注记（生产切换时新增）
 

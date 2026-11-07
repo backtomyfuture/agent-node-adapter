@@ -53,11 +53,41 @@ async function probeLan(socketPath, host, port) {
   }
 }
 
+function roleFrom(argv, opts, raw) {
+  if (opts?.role === "node" || opts?.role === "hub") return opts.role;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--role") {
+      const v = argv[i + 1];
+      if (v === "node" || v === "hub") return v;
+    } else if (a.startsWith("--role=")) {
+      const v = a.slice("--role=".length);
+      if (v === "node" || v === "hub") return v;
+    }
+  }
+  if (raw?.role === "hub" || raw?.role === "node") return raw.role;
+  return "node";
+}
+
 export async function doctor(configDir, appDir, opts = {}) {
   let problems = 0;
   const probeProvided = opts.probe != null;
   const probe = probeProvided ? parseProbeTarget(opts.probe) : null;
+
+  // 读取配置以辅助判断角色（若 CLI 或 opts 未显式给出）
+  const nodeJsonPath = path.join(configDir, "node.json");
+  let raw = null;
+  let rawError = null;
+  try {
+    raw = JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"));
+  } catch (e) {
+    rawError = e;
+  }
+
+  const role = roleFrom(process.argv, opts, raw);
+
   console.log(`hub-node doctor ${DAEMON_VERSION}`);
+  console.log(`role: ${role}`);
   console.log(`config dir: ${configDir}`);
   if (probeProvided && !probe) {
     bad(`--probe 需要 <host:port>（例如 192.168.1.10:22），收到：${opts.probe === "" ? "(空)" : opts.probe}`);
@@ -70,33 +100,38 @@ export async function doctor(configDir, appDir, opts = {}) {
   else { bad(`node ${process.versions.node} 过低，需要 >= 20`); problems++; }
 
   // 2. 配置文件
-  const nodeJsonPath = path.join(configDir, "node.json");
-  let raw = null;
-  try {
-    raw = JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"));
-    ok("node.json 可解析");
-  } catch (e) {
-    bad(`node.json 读不了：${e.message}`);
-    problems++;
-  }
   if (raw) {
+    ok("node.json 可解析");
     const placeholder = (v) => typeof v === "string" && v.startsWith("<");
     if (!raw.node || placeholder(raw.node)) { bad("node.json 的 node 未填"); problems++; }
     if (!raw.baseToken || placeholder(raw.baseToken)) { bad("node.json 的 baseToken 未填（还是示例占位符）"); problems++; }
     for (const k of ["tasks", "messages", "parts", "runs", "artifacts", "agentCards"]) {
       if (!raw.tables?.[k] || placeholder(raw.tables[k])) { bad(`node.json 的 tables.${k} 未填`); problems++; }
     }
-  }
-  try {
-    const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
-    const names = Object.keys(cmds);
-    ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
-    for (const [name, entry] of Object.entries(cmds)) {
-      if (!entry.command) { bad(`能力 ${name} 缺 command 模板`); problems++; }
-    }
-  } catch (e) {
-    bad(`commands.json 读不了：${e.message}`);
+  } else {
+    bad(`node.json 读不了：${rawError?.message ?? "文件不存在"}`);
     problems++;
+  }
+
+  if (role !== "hub") {
+    try {
+      const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
+      const names = Object.keys(cmds);
+      ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
+      for (const [name, entry] of Object.entries(cmds)) {
+        if (!entry.command) { bad(`能力 ${name} 缺 command 模板`); problems++; }
+      }
+    } catch (e) {
+      bad(`commands.json 读不了：${e.message}`);
+      problems++;
+    }
+  } else {
+    const hasCmds = fs.existsSync(path.join(configDir, "commands.json"));
+    if (hasCmds) {
+      info("commands.json 已存在（hub 角色不需要能力表，已忽略）");
+    } else {
+      ok("hub 角色无需 commands.json");
+    }
   }
 
   // 3. 依赖（事件订阅用的飞书 SDK）
@@ -108,7 +143,8 @@ export async function doctor(configDir, appDir, opts = {}) {
   let cfg = null;
   try {
     cfg = loadConfig(configDir);
-    ok(`凭据可读（节点 ${cfg.node}，app_id 已配置）`);
+    cfg.role = role;
+    ok(`凭据可读（${role === "hub" ? "枢纽" : "节点"} ${cfg.node}，app_id 已配置）`);
   } catch (e) {
     bad(`凭据不可用：${e.message}`);
     problems++;
@@ -123,45 +159,70 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
     try {
       const cards = await cfg.bus.listRecords(cfg.bus.tables.agentCards);
-      const mine = cards.filter((r) => f1(r, "Node") === cfg.node);
-      ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力`);
+      if (role === "hub") {
+        ok(`AgentCards 可读：总线共 ${cards.length} 项能力在册`);
+      } else {
+        const mine = cards.filter((r) => f1(r, "Node") === cfg.node);
+        ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力`);
+      }
       const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
       ok(`Tasks 可读：共 ${tasks.length} 条`);
     } catch (e) {
       bad(`读表失败：${e.message}`);
       problems++;
     }
-    info(cfg.events
-      ? `唤醒方式：事件订阅（长连接）＋ ${cfg.sweepSec}s 对账兜底`
-      : `唤醒方式：轮询 ${cfg.pollSec}s（事件订阅已关）`);
+    if (role === "hub") {
+      info(`唤醒方式：长连接（ws，表变更门铃 + card.action.trigger）＋ ${cfg.sweepSec}s 对账扫表（hub 角色强制长连接）`);
+    } else {
+      info(cfg.events
+        ? `唤醒方式：事件订阅（长连接 ws）＋ ${cfg.sweepSec}s 对账兜底`
+        : `唤醒方式：轮询（poll）${cfg.pollSec}s（事件订阅已关）`);
+    }
     // carrier 语境（设计 §9）：有 context=carrier 的能力，或显式 --probe 时才检查。
     // socket 探活成功只说明本机 carrier 在听，不宣称局域网可达。
-    try {
-      const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
-      const carrierCaps = Object.entries(cmds).filter(([, e]) => e.context === "carrier").map(([k]) => k);
-      if (carrierCaps.length || probe) {
-        const online = await pingCarrier(cfg.carrierSocket);
-        if (!online) {
-          const caps = carrierCaps.length ? `能力 ${carrierCaps.join(", ")} 将标离线；` : "";
-          const via = probe ? `无法探测 ${probe.host}:${probe.port}；` : "";
-          bad(`carrier 离线：${caps}${via}请在终端里跑 hub-node host`);
-          problems++;
-        } else if (!probe) {
-          ok(SOCKET_ONLINE);
-          if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
-        } else {
-          ok("carrier socket 在线，经其执行只读 TCP 探测");
-          if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
-          const reached = await probeLan(cfg.carrierSocket, probe.host, probe.port);
-          const target = `${probe.host}:${probe.port}`;
-          if (reached.ok) ok(`局域网目标 ${target} 可达（经 carrier 只读 TCP 探测）`);
-          else {
-            bad(`局域网目标 ${target} 不可达（经 carrier 只读 TCP 探测）${reached.detail ? "：" + reached.detail : ""}`);
+    if (role !== "hub") {
+      try {
+        const cmds = JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8"));
+        const carrierCaps = Object.entries(cmds).filter(([, e]) => e.context === "carrier").map(([k]) => k);
+        if (carrierCaps.length || probe) {
+          const online = await pingCarrier(cfg.carrierSocket);
+          if (!online) {
+            const caps = carrierCaps.length ? `能力 ${carrierCaps.join(", ")} 将标离线；` : "";
+            const via = probe ? `无法探测 ${probe.host}:${probe.port}；` : "";
+            bad(`carrier 离线：${caps}${via}请在终端里跑 hub-node host`);
             problems++;
+          } else if (!probe) {
+            ok(SOCKET_ONLINE);
+            if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
+          } else {
+            ok("carrier socket 在线，经其执行只读 TCP 探测");
+            if (carrierCaps.length) info(`carrier 能力：${carrierCaps.join(", ")}`);
+            const reached = await probeLan(cfg.carrierSocket, probe.host, probe.port);
+            const target = `${probe.host}:${probe.port}`;
+            if (reached.ok) ok(`局域网目标 ${target} 可达（经 carrier 只读 TCP 探测）`);
+            else {
+              bad(`局域网目标 ${target} 不可达（经 carrier 只读 TCP 探测）${reached.detail ? "：" + reached.detail : ""}`);
+              problems++;
+            }
           }
         }
+      } catch { /* commands.json 已在前面报过 */ }
+    } else if (probe) {
+      const online = await pingCarrier(cfg.carrierSocket);
+      if (!online) {
+        bad(`carrier 离线：无法探测 ${probe.host}:${probe.port}；请在终端里跑 hub-node host`);
+        problems++;
+      } else {
+        ok("carrier socket 在线，经其执行只读 TCP 探测");
+        const reached = await probeLan(cfg.carrierSocket, probe.host, probe.port);
+        const target = `${probe.host}:${probe.port}`;
+        if (reached.ok) ok(`局域网目标 ${target} 可达（经 carrier 只读 TCP 探测）`);
+        else {
+          bad(`局域网目标 ${target} 不可达（经 carrier 只读 TCP 探测）${reached.detail ? "：" + reached.detail : ""}`);
+          problems++;
+        }
       }
-    } catch { /* commands.json 已在前面报过 */ }
+    }
   }
   if (probe && !cfg) {
     bad(`无法探测 ${probe.host}:${probe.port}：配置未加载，不知道 carrier socket 路径`);

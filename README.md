@@ -5,14 +5,21 @@
 结果呈递；任意终端装上节点适配器即可入列干活，云端 Agent 也能按协议
 直接接入。任务只有一个发起面和一个状态面，全程留痕可查。
 
+> 方向说明（标准 v3.1）：枢纽（hub）是逻辑角色而不是独立进程，由
+> `hub-node daemon --role node|hub` 承载（省略 `--role` 时读 `node.json`
+> 的 `role`，缺省 node）。一台机器要同时当 hub 与 node，起两个守护进程、
+> 各用一个配置目录。仓库只有这一份 Node 实现。唤醒方式为 ws / poll /
+> webhook 三种（webhook 专指飞书自动化出站通知，本项目任何进程不主动推送），
+> 本项目任何进程都不开监听端口。hub 角色强制 ws。
+
 本仓库包含系统的全部公开部分：
 
 | 组成 | 位置 | 说明 |
 |---|---|---|
-| 中台标准 v3.0 | [docs/standard.md](docs/standard.md) | 七表对象模型、A2A 八态状态机、通信/审批/幂等协议（规范性文件） |
+| 中台标准 v3.1 | [docs/standard.md](docs/standard.md) | 七表对象模型、A2A 八态状态机、通信/审批/幂等协议（规范性文件） |
 | 系统架构 | [docs/architecture.md](docs/architecture.md) | 分层、核心决策与理由、生命周期、故障模型 |
 | Base 结构 | [docs/base-schema.md](docs/base-schema.md) · [schema/](schema/) | 七表字段级定义，由运行中的 Base 生成（附生成器） |
-| 枢纽对接 | [docs/hub-integration.md](docs/hub-integration.md) · [hub/](hub/) | 枢纽职责、建单纪律、呈递与审批回路＋一份可运行的参考实现 |
+| 枢纽对接 | [docs/hub-integration.md](docs/hub-integration.md) · `src/hub/` | 枢纽职责、建单纪律、呈递与审批回路；实现是 `hub-node daemon --role hub` |
 | 节点适配器 | 本仓库 `bin/` `src/` · [DESIGN.md](DESIGN.md) | 把任何终端变成执行节点：认领 → 拉起本机脚本/Agent → 收回执 → 落日志 |
 | 协议接入 | [docs/protocol-node-runbook.md](docs/protocol-node-runbook.md) | 无守护进程的 Agent 按手册盯表接入（同一套协议） |
 
@@ -25,41 +32,67 @@ flowchart LR
     BUS -->|"终态 / 待答 / 待批"| HUB
 ```
 
-## 作为节点加入一个现成的中台
+## 快速上手
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
-hub-node setup      # 纯提示式向导，见下
-```
+### 路径 A：加入现成中台（装一个 node）
 
-脚本把程序装到 `~/.hub-node/app`、配置放在 `~/.hub-node/`、命令入口链接到
-`~/.local/bin/hub-node`；重跑即更新，已有配置不覆盖。前置只有 Node >= 20
-与一张按标准建好的 Base（向中台的操作者要链接即可）。
+向中台管理员获取已建好的 Base 链接，只需 3 步：
 
-setup 是纯提示式：粘贴 Base 链接、给节点起个名、选一下机器在哪
-（家里/公司），最后确认一眼即可；用哪个应用在只有一个时自动选定。
-lark-cli 没装它会装、已配的应用它会复用（Secret 只在本机从配置/钥匙串
-解析进 app.env，权限 600，绝不进总线）；表 ID 自动发现，app.env /
-node.json / commands.json 全部自动生成，最后跑一遍 doctor 自检并可顺带
-注册自启。全参数化也可以：
-`hub-node setup --base <Base链接> --node <节点名> --yes --service`。
+1. **安装程序**（前置需 Node.js >= 20）：
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
+   ```
+   程序安装到 `~/.hub-node/app`，可执行入口链接至 `~/.local/bin/hub-node`。
 
-```bash
-hub-node doctor     # 之后随时复检
-hub-node daemon     # 前台试跑（setup 里选了自启则已在跑）
-hub-node service    # 注册/卸载开机自启（macOS launchd / Linux systemd 用户级）
-```
+2. **一键向导配置**：
+   ```bash
+   hub-node setup
+   ```
+   提示式向导会自动发现 lark-cli 应用、解析 Base 六表 ID、写入 600 权限的 `app.env` 与 `node.json`，种下初始回声能力并运行 `doctor` 自检。最后可直接确认注册开机自启。
 
-手动安装等价于 clone 本仓库后 `npm install`，再把示例配置拷到配置目录。
+3. **验收运行**：
+   ```bash
+   hub-node doctor      # 检查连通性与能力登记
+   hub-node daemon      # 前台运行试跑（若 setup 中已注册自启则已常驻）
+   ```
+   由中台派发一条 `echo-test` 任务到该节点即可验证回显。
 
-## 搭一个自己的中台
+---
 
-1. 照 [docs/base-schema.md](docs/base-schema.md) 在飞书多维表格里建七张表
-   （或用字段 API 批量建），得到 Base token；
-2. 按 [hub/README.md](hub/README.md) 部署枢纽参考实现（接收端常驻＋
-   watcher 周期跑），并在本机交互终端完成一次事件订阅注册；
-3. 每台机器按上一节入列；没有守护进程的 Agent 按
-   [协议节点运行手册](docs/protocol-node-runbook.md) 接入。
+### 路径 B：自建中台（单机起 hub + node 双角色）
+
+一台机器同时承担枢纽（发审批/呈递）与执行节点，起两个守护进程、各用一个配置目录与服务：
+
+1. **准备 Base**：
+   按照 [docs/base-schema.md](docs/base-schema.md) 在飞书多维表格中建好七张标准表，获取 Base 链接与机主的 `open_id`。安装程序：
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.sh | sh
+   ```
+
+2. **配置并启动枢纽（hub）**：
+   ```bash
+   hub-node setup --role hub --config ~/.hub-node-hub --owner <机主open_id>
+   hub-node service --role hub --config ~/.hub-node-hub
+   ```
+   hub 强制长连接（ws），向导会尝试向 Base 注册云文档事件订阅；服务名为 `hub-node-hub.hub`。
+
+3. **配置并启动执行节点（node）**：
+   ```bash
+   hub-node setup --role node --config ~/.hub-node
+   hub-node service --role node --config ~/.hub-node
+   ```
+   node 服务名为 `hub-node-node.<节点名>`。两套守护进程独立运行、互不覆盖，各自记录日志。
+
+---
+
+### 接入外部 bot（如 Grok bot）：飞书自动化 + webhook
+
+对于托管在外部云平台、无法运行 Node 守护进程且无长连接能力的 Agent（如 Grok bot）：
+
+1. **定义与名片**：在 AgentCards 表登记该 bot 的能力与节点标识，`Receive_Mode` 设为 `automation`。
+2. **飞书多维表格自动化**：在 Base 配置自动化流程——当 Tasks 表有新记录写入或状态变更（且 `Target_Node` 为该 bot）时，触发飞书自动化向该 bot 的公网端点发送 HTTP POST。**只发送 ID（Task_ID、状态、Msg_ID），不带任务正文与敏感数据**。
+3. **拉取与回写**：外部 bot 收到 webhook 门铃后，通过飞书 REST API 回查 Messages / Parts 拉取参数；执行完毕后按 A2A 协议写回 Messages、Parts、Runs 并更新 Tasks 状态。外部 bot 须自行设置低频对账（如 15 分钟）兜底扫表。
+> **红线原则**：本项目守护进程绝不开监听端口、不做端口映射与反向隧道，也不主动向外部节点发起推送（标准 §0 第 3 条、§10.3）。出站通知完全由飞书官方多维表格自动化驱动。详细规范见 [协议节点运行手册](docs/protocol-node-runbook.md)。
 
 ## 节点配置要点
 

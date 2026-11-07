@@ -1,5 +1,7 @@
 # lark-a2a-hub 第二评审：核实结论与优化路线
 
+2026-11-06 注：本评审引用的 Python 枢纽源文件已从仓库删除。证据路径里的「接收端 / 呈递扫描 / 审批发卡」就是当时那几个文件，行号仍按评审当日的源码。
+
 日期 2026-11-05。逐条回到源码核实 `/tmp/ana-research/review.md`（30 项），行号按当前工作树。只读仓库，未执行任何联网或真实 Base 操作。
 
 **核实统计：确认 25｜部分成立 5｜误报 0｜新增 8**（另有 3 条新证据并入原条目：01、13、27）。
@@ -10,7 +12,7 @@
 | # | 判定 | 级别 | 理由与证据 |
 |---|---|---|---|
 | 01 | 确认 | 高 | `src/kernel.mjs:379-386` 有文本兜底；并且任意一条 approve 就放行，不校验 From_Node/Role，也不绑定 Status_Msg 或"最新决定"。节点上的 Agent 拿着 lark-cli 就能替别的任务写批准。 |
-| 02 | 确认 | 高 | `hub/event_receiver.py:135-145` 只读 `action.value`，不比对操作者与 `HUB_OWNER_OPEN_ID`（`hub/hub_api.py:26`）。卡片只发机主私聊（`approval_watcher.py:66`），能缓解，但不能当作鉴权。 |
+| 02 | 确认 | 高 | `hub/接收端（已删除）:135-145` 只读 `action.value`，不比对操作者与 `HUB_OWNER_OPEN_ID`（`hub/hub_api.py:26`）。卡片只发机主私聊（`审批发卡（已删除）:66`），能缓解，但不能当作鉴权。 |
 | 03 | 确认 | 高 | 只认任务行（`kernel.mjs:475`），`side_effect` 只写进名片（`:315`）。标准 §8.3 第 3 点已允许"节点自有红线优先"，加本地下限不违标准。 |
 | 04 | 确认 | 高 | `kernel.mjs:190-208` 把指令文本和参数原样拼进 prompt；示例模板带 `--dangerously-skip-permissions`（`config/commands.example.json:17,25`）。AGENTS.md 已承认这个缺口。 |
 | 05 | 确认 | 高 | `bin/hub-node.mjs:36-38` 没有实例锁，回读只比 `Claimed_By=node`（`kernel.mjs:404-405`）。launchd 和手动 daemon 同时在跑时，两边都能通过回读校验。 |
@@ -21,8 +23,8 @@
 | 10 | 确认 | 高 | `kernel.mjs:286-287` 的 stdin 型模板直接走 `runShell`，违反 DESIGN §9 的铁律。 |
 | 11 | 确认 | 高 | 先写消息、后写 Parts（`:138-145`）。Parts 写失败后进入通用 catch，任务回到 submitted，下一轮被 `:470` 关成没有正文的 completed。`askApproval` 在 `:391` 见到已有 auth_request 就直接 return，任务永远卡在 submitted。 |
 | 12 | 确认 | 高 | 范围比原报告大：命令成功后，`registerArtifact`/`writeRun`/`writeMessage` 任何一次写表失败（`:419-424`）也会落进 `:434-442` 的重试，重新执行业务。`stdout="null"` 时 `:276` 抛 TypeError。 |
-| 13 | 部分成立 | 高 | 批准路径会清 Presented（`event_receiver.py:171`），原报告没提。但答复续跑路径和节点都不清。另有新证据：`_queue_scan` 按 record_id 永久去重（`:81-95`），即使 Presented 被清，任务也进不了队列，除非消费者删掉队列行。 |
-| 14 | 确认 | 高 | `present_results.py:41` 用了 `--limit 200`。本机 lark-cli 帮助写明 json 格式上限 200、单次请求，需要 `--offset` 续读。 |
+| 13 | 部分成立 | 高 | 批准路径会清 Presented（`接收端（已删除）:171`），原报告没提。但答复续跑路径和节点都不清。另有新证据：`_queue_scan` 按 record_id 永久去重（`:81-95`），即使 Presented 被清，任务也进不了队列，除非消费者删掉队列行。 |
+| 14 | 确认 | 高 | `呈递扫描（已删除）:41` 用了 `--limit 200`。本机 lark-cli 帮助写明 json 格式上限 200、单次请求，需要 `--offset` 续读。 |
 | 15 | 部分成立 | 高→中 | `sh -c` 只有一条简单命令时会直接 exec 到命令本身，所以示例里的单命令模板超时能杀到本体。复合命令、Agent 派生的子进程会漏杀，`close` 还会被孤儿进程拖住（`kernel.mjs:228-236`，`carrier.mjs:91-99`）。 |
 | 16 | 确认 | 高 | 两处都没有 `p.stdin.on("error")`（`kernel.mjs:237`，`carrier.mjs:100`）；`bin/hub-node.mjs:27` 只兜 unhandledRejection。触发条件是输入超过管道缓冲（约 64KB）且执行器不读 stdin 就退出。 |
 | 17 | 确认 | 高 | 比原报告更糟：`install.sh:40-43` 先种了 node.json，于是 `setup.mjs:229-231` 在 `--yes` 下直接返回 4，交互模式默认回答 N。echo 路径 `../src` 是相对 `~/.hub-node` 解析的，指错；lan-exec 让 doctor 失败（`doctor.mjs:100-101`），setup 中止，自启不会注册。 |
@@ -32,10 +34,10 @@
 | 21 | 确认 | 中 | `:307-311` 跳过已有名片；`:332-333` 先改缓存，再写表。 |
 | 22 | 确认 | 中 | `:199,503-506` 只带最后一个问题之后的答复，问题原文不进 prompt。 |
 | 23 | 确认 | 中→低 | FilePart 输入确实被丢（`:103-115`），但参考枢纽从不在 instruction 里写 FilePart，属于能力缺口。 |
-| 24 | 确认 | 中 | 卡片的"上下文"栏显示的是 Context_ID（`approval_watcher.py:30,44`）；auth_request 正文也只有标题（`kernel.mjs:392-393`）。 |
+| 24 | 确认 | 中 | 卡片的"上下文"栏显示的是 Context_ID（`审批发卡（已删除）:30,44`）；auth_request 正文也只有标题（`kernel.mjs:392-393`）。 |
 | 25 | 确认 | 中→低 | 和标准 §8.1 第 2 步不符，但执行中的状态已经由 working+Heartbeat_At 表达，影响限于台账审计。 |
 | 26 | 确认 | 中 | `doctor.mjs:97-98` 只 ping 了一下就宣称可用；README:76-88 没有转述 DESIGN §9 注记④ 的限定。 |
-| 27 | 确认 | 中 | 只在事件到达时扫描（`event_receiver.py:103-120`）。补充：hub-integration.md:20 承诺的"陈旧任务告警"也没有实现，而节点只回收 `Claimed_By` 是自己的任务（`kernel.mjs:361`），死节点的任务没人管。 |
+| 27 | 确认 | 中 | 只在事件到达时扫描（`接收端（已删除）:103-120`）。补充：hub-integration.md:20 承诺的"陈旧任务告警"也没有实现，而节点只回收 `Claimed_By` 是自己的任务（`kernel.mjs:361`），死节点的任务没人管。 |
 | 28 | 部分成立 | 中→低 | 脚本头注释（`:5`）约定由 stdout 的 OK/REPAIRED/BROKEN 表达结果，所以 BROKEN 时 exit 0 符合这个约定。真问题只有一处：`:9-11` 的 cp/start 失败了仍打印 REPAIRED。 |
 | 29 | 确认 | 中 | `setup.mjs:167` 输入时回显明文；另有 `--app-secret` 命令行参数（`:33`），会留在 ps 和 shell 历史里。 |
 | 30 | 确认 | 低 | 只有 `package.json` 落后（0.3.0）；`package-lock.json:3` 和 DAEMON_VERSION 都是 0.4.1。 |
@@ -44,11 +46,11 @@
 
 - **N1 [高] 每读一条消息都扫全表**：`listMessages` 每次拉完整个 Messages 表，`listParts` 每读一条消息就拉一次整个 Parts 表（`kernel.mjs:94-101`）。`authApproved`、`instructionText`、`getParams`、`buildPrompt` 和 `writeMessage` 的计数都重复走这条路，一个任务要做几十次全表分页。表一大（hub-integration.md:104 写了 2 万行上限）就会触发 429、拖慢主循环，还会放大 11/12 的半写入。
 - **N2 [中] POST 重试不幂等**：`feishu.mjs:34-60` 对网络错误和 5xx 一律重放 `createRecord`（`:77-79`），但不带 `client_token`。请求其实已经成功、只是响应丢了时，会写出重复的 Messages/Parts 行，而这两张表只追加、不可删。
-- **N3 [中] 消息编号靠计数，顺序靠列表返回序**：Msg/Artifact/Run 的 ID 都是"现有行数+1"（`kernel.mjs:136-137,153-155,167-168`，`event_receiver.py:147-148`），节点和枢纽并发写时会撞号。"首条 instruction""question 之后的 answer""最后一条消息"都依赖 API 的返回顺序（`kernel.mjs:120,499-506`，`present_results.py:92`），没有按 Seq 或 Created_At 排序。
+- **N3 [中] 消息编号靠计数，顺序靠列表返回序**：Msg/Artifact/Run 的 ID 都是"现有行数+1"（`kernel.mjs:136-137,153-155,167-168`，`接收端（已删除）:147-148`），节点和枢纽并发写时会撞号。"首条 instruction""question 之后的 answer""最后一条消息"都依赖 API 的返回顺序（`kernel.mjs:120,499-506`，`呈递扫描（已删除）:92`），没有按 Seq 或 Created_At 排序。
 - **N4 [中] `params.timeout_sec` 没有上下界**：`kernel.mjs:263` 不做范围限制，任务可以要求极长的超时，心跳会一直续命，串行主循环被长期占住；非数字值会变成 NaN。把它收紧到本地上限属于缩小例外，不违反 AGENTS.md。
 - **N5 [低] 心跳与主流程同表并发写**：`setInterval` 心跳（`:412-415`）和收尾时的 `updateRecord` 可能并发，违反"同表写串行"；`clearInterval`（`:452`）也拦不住已经发出的那次心跳，它会在终态之后改写 Heartbeat_At。
 - **N6 [低] 标准与实现不一致**：标准 §8.3 写的是"认领后写 auth_request"，实现和 AGENTS.md 都是 `submitted→auth-required`，不经认领。
-- **N7 [低] 发卡状态只在最后落盘**：`approval_watcher.py:58-70` 中途任一 `send_card` 抛错，整批状态都不保存，下次会重复发卡；`USER_OPEN_ID` 为空时不提前报错。
+- **N7 [低] 发卡状态只在最后落盘**：`审批发卡（已删除）:58-70` 中途任一 `send_card` 抛错，整批状态都不保存，下次会重复发卡；`USER_OPEN_ID` 为空时不提前报错。
 - **N8 [低] 配置错误导致重启风暴**：`bin/hub-node.mjs:37` 的 `loadConfig` 抛错时进程直接退出，launchd 的 `KeepAlive`（`service.mjs:64`）会反复拉起。应该打一条可读日志后退出码非零并退避，而不是无声刷屏。
 
 ## 三、优化路线（已合并去重）
@@ -84,8 +86,8 @@
   1. auth_decision 必须 `From_Node=hub`、`Role=user`、`In_Reply_To` 等于当前 `Status_Msg`，以最新一条为准，只认 DataPart。
   2. 回调必须校验操作者是机主。
   3. 节点可以用 `commands.json` 的 `approval_class` 声明下限，和任务行取两者中更严格的。
-- 文件：`src/kernel.mjs`（`authApproved` 删除文本兜底，`handleTask` 合并本地下限）、`hub/event_receiver.py`（比对 `data.event.operator.open_id` 与 `HUB_OWNER_OPEN_ID`，并写 `In_Reply_To`）、`config/commands.example.json`（write 类示例加上 `approval_class`）。
-- 验证：FakeBus 覆盖：先 reject 后 approve、他人写的 approve、绑定旧请求的 approve、带下限但任务行未标。用伪造的 operator 调一次 `on_card_action`，并跑 `py_compile`。
+- 文件：`src/kernel.mjs`（`authApproved` 删除文本兜底，`handleTask` 合并本地下限）、`hub/接收端（已删除）`（比对 `data.event.operator.open_id` 与 `HUB_OWNER_OPEN_ID`，并写 `In_Reply_To`）、`config/commands.example.json`（write 类示例加上 `approval_class`）。
+- 验证：FakeBus 覆盖：先 reject 后 approve、他人写的 approve、绑定旧请求的 approve、带下限但任务行未标。用伪造的 operator 调一次 `on_card_action`，并跑 `语法检查`。
 - 依赖：标准改完后，kernel 和 hub 两侧可并行。
 
 **P0-4 不静默直跑、不崩进程**（10、16）【可并行，几行改动】
@@ -116,7 +118,7 @@
 - 呈递去重改为"任务＋当前 Status_Msg"：`--list` 输出 `status_msg`，队列按 `(record_id, status_msg)` 去重；`--mark` 记录已呈递的 Msg_ID，可放进 Tasks.Metadata。
 - 新增 `--sweep` 周期模式，配 systemd timer 示例（20 分钟），同时报告陈旧 working 任务。
 - watcher 每发一张卡就保存一次状态，`USER_OPEN_ID` 为空时启动即报错。
-- 文件：`hub/present_results.py`、`event_receiver.py`、`approval_watcher.py`、`hub/README.md`、`docs/hub-integration.md`。
+- 文件：`hub/呈递扫描（已删除）`、`接收端（已删除）`、`审批发卡（已删除）`、`hub/README.md`、`docs/hub-integration.md`。
 - 验证：用 mock 的 lark-cli 输出 250 行、has_more 的数据，测一遍完整的问答续跑后最终结果能二次入队。
 - 依赖：无。如果呈递去重改用 Metadata，要在标准 §8.5 补一句。
 
@@ -153,7 +155,7 @@
 **P1-8 审批卡展示待执行内容**（24）
 - auth_request 的正文带上指令摘要，以及脱敏、截断后的参数。
 - 卡片读 `Status_Msg` 指向的 Parts，代替原来显示的 Context_ID。
-- 文件：`kernel.mjs:389-396`、`approval_watcher.py:29-44`。
+- 文件：`kernel.mjs:389-396`、`审批发卡（已删除）:29-44`。
 - 依赖：P0-3、P1-1（需要确定哪些参数可以展示）。
 
 ### P2（承诺补齐与一致性）
@@ -174,4 +176,4 @@
 - **轨道 D（装机，完全并行）**：P1-4 → P2-5 → P2-7。
 - **必须先改 docs/standard.md 的**：P0-2、P0-3（含 N6）、P1-1（§9）、P1-5（§8.4）、P2-1（§8.4）；P1-3 若改用 Metadata 记录呈递，也要补 §8.5。
 - **不需要动标准的**：P0-1、P0-4、P1-2、P1-4、P1-6、P1-7（只是落实 §3、§8.4 已有的要求）、P2-4 到 P2-7。
-- 每项验收都按 AGENTS.md 的命令跑：逐文件 `node --check`、`py_compile`、echo 冒烟；行为验证用临时 FakeBus 脚本，用完删除。不新增测试框架。
+- 每项验收都按 AGENTS.md 的命令跑：逐文件 `node --check`、`语法检查`、echo 冒烟；行为验证用临时 FakeBus 脚本，用完删除。不新增测试框架。

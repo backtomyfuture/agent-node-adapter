@@ -19,12 +19,17 @@ const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "Age
 const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
 
 function parseFlags(argv) {
-  const f = { yes: false, force: false, service: false };
+  const f = { yes: false, force: false, service: false, role: "node" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") f.yes = true;
     else if (a === "--force") f.force = true;
     else if (a === "--service") f.service = true;
+    else if (a === "--role") f.role = argv[++i] || "node";
+    else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
+    else if (a === "--owner" || a === "--owner-open-id") f.ownerOpenId = argv[++i];
+    else if (a.startsWith("--owner=")) f.ownerOpenId = a.slice("--owner=".length);
+    else if (a.startsWith("--owner-open-id=")) f.ownerOpenId = a.slice("--owner-open-id=".length);
     else if (a === "--base") f.base = argv[++i];
     else if (a === "--node") f.node = argv[++i];
     else if (a === "--zone") f.zone = argv[++i];
@@ -48,6 +53,23 @@ function richPath() {
 
 function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, ...opts });
+}
+
+// 尝试以当前用户身份向 Base 注册云文档事件订阅（ws 秒级门铃所需）
+function tryRegisterDriveSubscription(baseToken) {
+  try {
+    const out = run("lark-cli", [
+      "api", "POST", `/open-apis/drive/v1/files/${baseToken}/subscribe`,
+      "--params", JSON.stringify({ file_type: "bitable" }),
+      "--as", "user",
+      "--json",
+    ]);
+    const parsed = JSON.parse(out);
+    if (parsed?.ok || parsed?.code === 0) return { success: true };
+    return { success: false, error: parsed?.error?.message || parsed?.msg || out.trim() };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 }
 
 function larkVersion() {
@@ -208,6 +230,11 @@ async function askHidden(rl, prompt) {
 
 export async function runSetup(configDir, argv, appDir) {
   const flags = parseFlags(argv);
+  const role = flags.role || "node";
+  if (role !== "node" && role !== "hub") {
+    console.error(`  ✗ --role 只能是 node 或 hub，收到：${role}`);
+    return 2;
+  }
   if (flags.rejectAppSecret) {
     console.error("  ✗ 已移除 --app-secret（会进入进程列表和 shell 历史）。请改用环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
     return 2;
@@ -224,7 +251,8 @@ export async function runSetup(configDir, argv, appDir) {
   };
 
   try {
-    console.log("hub-node setup —— 一键配置节点");
+    console.log(`hub-node setup —— 一键配置${role === "hub" ? "枢纽（hub）" : "节点（node）"}`);
+    console.log(`role: ${role}`);
     console.log(`config dir: ${configDir}`);
 
     // 1. 凭据优先走环境变量或已有 600 app.env。两边都齐时跳过 lark-cli，
@@ -256,7 +284,7 @@ export async function runSetup(configDir, argv, appDir) {
       else if (larkCfg.apps.length === 1) appEntry = larkCfg.apps[0];
       else {
         larkCfg.apps.forEach((a, i) => console.log(`    ${i + 1}. ${a.appId}${a.users?.[0]?.userName ? `（${a.users[0].userName}）` : ""}`));
-        const pick = await ask("选择用作节点身份的应用序号", "1");
+        const pick = await ask(`选择用作${role === "hub" ? "枢纽" : "节点"}身份的应用序号`, "1");
         appEntry = larkCfg.apps[Number(pick) - 1] || larkCfg.apps[0];
       }
       if (appEntry) appId = appEntry.appId;
@@ -315,23 +343,51 @@ export async function runSetup(configDir, argv, appDir) {
     for (const n of REQUIRED_TABLES) tables[TABLE_KEYS[n]] = byName.get(n);
     console.log(`  ✓ Base 表发现完成（${REQUIRED_TABLES.length} 张标准表齐全）`);
 
-    // 4. 节点身份（交互只问两件：叫什么、在哪用；前缀自动取节点名末段，说明不问）
-    const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || "node";
-    const node = flags.node || (await ask("给这台机器起个节点名（中台按这个名字派活）", hostDefault));
-    let zone = flags.zone || null;
-    if (!zone) {
-      if (!interactive) zone = "home";
-      else {
-        const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
-        zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
+    // 4. 身份与参数配置
+    let node, zone, prefix, nodeDesc, ownerOpenId;
+    if (role === "hub") {
+      node = flags.node || "hub";
+      ownerOpenId = flags.ownerOpenId || (process.env.HUB_OWNER_OPEN_ID || "").trim();
+      const defaultOwner = appEntry?.users?.[0]?.openId || "";
+      if (!ownerOpenId) {
+        if (interactive) {
+          ownerOpenId = await ask(
+            "输入机主 open_id（例如 ou_xxxx，审批卡只发给此人且回调只认此人）",
+            defaultOwner || undefined
+          );
+        } else if (defaultOwner) {
+          ownerOpenId = defaultOwner;
+        } else {
+          throw new Error("非交互模式配置 hub 角色缺少机主 open_id：请用 --owner 提供，或设置环境变量 HUB_OWNER_OPEN_ID");
+        }
       }
-    }
-    const prefix = flags.prefix || node.split("-").filter(Boolean).pop() || node;
-    const nodeDesc = flags.desc ?? "";
-    if (interactive) {
-      console.log(`  · 即将配置：节点 ${node}（${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
-      const go = await ask("开始配置？(Y/n)", "Y");
-      if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
+      if (!ownerOpenId) {
+        console.error("  ✗ hub 角色必须配置机主 open_id，未配置时审批回调一律拒绝。");
+        return 2;
+      }
+      if (interactive) {
+        console.log(`  · 即将配置：枢纽 ${node}（机主 ${ownerOpenId.slice(0, 8)}…），应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+        const go = await ask("开始配置？(Y/n)", "Y");
+        if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
+      }
+    } else {
+      const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || "node";
+      node = flags.node || (await ask("给这台机器起个节点名（中台按这个名字派活）", hostDefault));
+      zone = flags.zone || null;
+      if (!zone) {
+        if (!interactive) zone = "home";
+        else {
+          const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
+          zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
+        }
+      }
+      prefix = flags.prefix || node.split("-").filter(Boolean).pop() || node;
+      nodeDesc = flags.desc ?? "";
+      if (interactive) {
+        console.log(`  · 即将配置：节点 ${node}（${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+        const go = await ask("开始配置？(Y/n)", "Y");
+        if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
+      }
     }
 
     // 5. 写配置。真实 node.json 默认不覆盖；仍是示例占位符则视为首装未完成。
@@ -359,8 +415,20 @@ export async function runSetup(configDir, argv, appDir) {
     const appEnvPath = path.join(configDir, "app.env");
     fs.writeFileSync(appEnvPath, `APP_ID=${appId}\nAPP_SECRET=${secret}\n`, { mode: 0o600 });
     fs.chmodSync(appEnvPath, 0o600);
-    const nodeJson = {
-      node, zone, nodeDesc,
+    const nodeJson = role === "hub" ? {
+      node,
+      role: "hub",
+      ownerOpenId,
+      appEnv: appEnvPath,
+      baseToken,
+      sweepSec: 900,
+      events: true,
+      tables,
+    } : {
+      node,
+      role: "node",
+      zone,
+      nodeDesc,
       appEnv: appEnvPath,
       baseToken,
       pollSec: 45,
@@ -371,28 +439,66 @@ export async function runSetup(configDir, argv, appDir) {
       tables,
     };
     fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
-    const cmdPath = path.join(configDir, "commands.json");
-    const cmdExisted = fs.existsSync(cmdPath);
-    let exampleCmds = false;
-    if (cmdExisted) {
-      try { exampleCmds = isExampleCommands(JSON.parse(fs.readFileSync(cmdPath, "utf8"))); } catch { /* 留着，下面不覆盖 */ }
-    }
-    // 缺文件，或这次是在收尾首装（原来没有正式 node.json）且能力表仍是示例。
-    const replaceCmds = !cmdExisted || (exampleCmds && (!nodeExisted || placeholder));
-    if (replaceCmds) {
-      fs.writeFileSync(cmdPath, JSON.stringify(echoSeed(appDir), null, 1) + "\n");
-      console.log(cmdExisted
-        ? "  ✓ 已写入 app.env（600）、node.json；示例 commands.json（相对路径 echo / lan-exec）已换成绝对路径 echo-test"
-        : "  ✓ 已写入 app.env（600）、node.json、commands.json（种子能力 echo-test，绝对路径）");
+
+    if (role === "node") {
+      const cmdPath = path.join(configDir, "commands.json");
+      const cmdExisted = fs.existsSync(cmdPath);
+      let exampleCmds = false;
+      if (cmdExisted) {
+        try { exampleCmds = isExampleCommands(JSON.parse(fs.readFileSync(cmdPath, "utf8"))); } catch { /* 留着，下面不覆盖 */ }
+      }
+      // 缺文件，或这次是在收尾首装（原来没有正式 node.json）且能力表仍是示例。
+      const replaceCmds = !cmdExisted || (exampleCmds && (!nodeExisted || placeholder));
+      if (replaceCmds) {
+        fs.writeFileSync(cmdPath, JSON.stringify(echoSeed(appDir), null, 1) + "\n");
+        console.log(cmdExisted
+          ? "  ✓ 已写入 app.env（600）、node.json；示例 commands.json（相对路径 echo / lan-exec）已换成绝对路径 echo-test"
+          : "  ✓ 已写入 app.env（600）、node.json、commands.json（种子能力 echo-test，绝对路径）");
+      } else {
+        console.log("  ✓ 已写入 app.env（600）、node.json；commands.json 已存在，保留原样");
+      }
     } else {
-      console.log("  ✓ 已写入 app.env（600）、node.json；commands.json 已存在，保留原样");
+      console.log("  ✓ 已写入 app.env（600）、node.json（hub 角色不需要 commands.json）");
     }
-    console.log("  · events 先关（45 秒轮询）；事件订阅需在该机以用户身份向 Base 注册一次，属可选加速项。");
+
+    // 尝试向 Base 注册云文档事件订阅
+    const subRes = tryRegisterDriveSubscription(baseToken);
+    if (subRes.success) {
+      console.log("  ✓ 云文档事件订阅已成功注册到 Base（长连接秒级唤醒已就绪）");
+      if (role === "node") {
+        nodeJson.events = true;
+        fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
+      }
+    } else {
+      if (role === "hub") {
+        console.log(`  · 云文档事件订阅未自动完成（${subRes.error ? subRes.error.slice(0, 100) : "需用户登录"}）`);
+        console.log("    hub 角色强制使用长连接（用于审批卡回调与事件唤醒）。若要接收表变更秒级门铃，请在本机终端执行以下一次性步骤：");
+        console.log("    1. lark-cli auth login --scope docs:event:subscribe");
+        console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
+        console.log("    （未完成订阅时，hub 仍可通过长连接接收审批卡回调与 15 分钟定时扫表）");
+      } else {
+        console.log("  · events 先关（45 秒轮询）；事件订阅需在该机以用户身份向 Base 注册一次，属可选加速项。");
+        console.log("    若需升级为 ws 秒级唤醒，可随时在本机终端执行以下一次性步骤：");
+        console.log("    1. lark-cli auth login --scope docs:event:subscribe");
+        console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
+        console.log(`    3. 将 ${nodeJsonPath} 中的 "events" 改为 true`);
+      }
+    }
 
     // 6. 自检
-    const dc = await doctor(configDir, appDir);
+    let dc = await doctor(configDir, appDir, { role });
+    if (role === "hub") {
+      try {
+        const { hubDoctor } = await import("./hub/index.mjs");
+        const extra = await hubDoctor(configDir);
+        if (extra) dc = 1;
+      } catch (e) {
+        console.error("  ✗ hub 自检模块加载失败：" + e.message);
+        dc = 1;
+      }
+    }
     if (dc !== 0) {
-      console.error("  ✗ 自检未全过，按上面清单修完后运行 `hub-node doctor` 复查。");
+      console.error(`  ✗ 自检未全过，按上面清单修完后运行 \`hub-node doctor${role === "hub" ? " --role hub" : ""}\` 复查。`);
       return dc;
     }
 
@@ -400,13 +506,17 @@ export async function runSetup(configDir, argv, appDir) {
     let wantService = flags.service;
     if (!wantService && interactive) wantService = /^y/i.test(await ask("现在注册开机自启并启动守护？(Y/n)", "Y"));
     if (wantService) {
-      const sc = await service(configDir, {}, appDir);
+      const sc = await service(configDir, { role }, appDir);
       if (sc !== 0) { console.error("  ✗ 自启注册失败，看上面输出。"); return sc; }
       console.log("  ✓ 自启已注册、守护已启动。");
     } else {
-      console.log("  · 未注册自启；手动运行守护：hub-node daemon");
+      console.log(`  · 未注册自启；手动运行守护：hub-node daemon${role === "hub" ? " --role hub" : ""} --config ${configDir}`);
     }
-    console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-），枢纽派 echo-test 到 ${node} 即可验收。`);
+    if (role === "hub") {
+      console.log(`setup 完成：枢纽 hub 就绪（机主已绑定），可通过 hub-node daemon --role hub 常驻。`);
+    } else {
+      console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-），枢纽派 echo-test 到 ${node} 即可验收。`);
+    }
     return 0;
   } finally {
     rl.close();

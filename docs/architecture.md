@@ -15,13 +15,13 @@
 
 ```mermaid
 flowchart TB
-    OP["操作者"] --> HUB["枢纽 hub<br/>意图理解 · 拆解 · 路由 · 审批发起 · 结果呈递"]
+    OP["操作者"] --> HUB["hub 角色（逻辑角色）<br/>意图理解 · 拆解 · 路由 · 审批发起 · 结果呈递"]
     HUB -->|"建单：先写 instruction 消息＋Parts<br/>最后写 Tasks 行（任务行＝触发信号）"| BUS
     BUS["飞书多维表格（总线）<br/>Tasks · Messages · Parts · Runs · Artifacts · AgentCards · Rules"]
-    BUS -->|"记录变更事件（长连接推送）<br/>＋低频对账扫表兜底"| N1
+    BUS -->|"ws 长连接事件或 poll 轮询<br/>＋低频对账扫表兜底"| N1
     BUS -->|"同上"| N2
-    BUS -->|"自动化 / webhook 唤醒"| N3
-    N1["守护进程型节点<br/>lark-a2a-hub<br/>（家用机、服务器…）"]
+    BUS -->|"webhook 通知<br/>（飞书自动化 POST，只带 ID）"| N3
+    N1["守护进程型节点<br/>hub-node --role node<br/>（家用机、服务器…）"]
     N2["守护进程型节点<br/>（工作机…）"]
     N3["协议接入型节点<br/>（云端 Agent 等<br/>无守护进程、按手册盯表）"]
     N1 -->|"本地命令模板"| W1["脚本 / 本地 Agent / 浏览器 / 终端"]
@@ -49,12 +49,15 @@ flowchart TB
    一行一项能力：某节点能查某台 NAS，是因为它与 NAS 同网且持有凭据，
    不是因为装了某个程序。路由只查表；节点只接自己登记且可派发的能力，
    表外任务明确拒收并说明缺口——能力即边界。
-5. **事件推送为主、低频对账为兜底。** 记录变更事件经长连接（WebSocket）
-   推送，秒级唤醒；但事件断线不补发，所以每个节点保留低频（默认 15
-   分钟）对账扫表。对账是安全网，不是心跳，频率固定低值。
-6. **只出不进。** 节点只发起出站连接（飞书 API / 长连接 / 自动化），
+5. **事件推送为主、低频对账为兜底。** 唤醒只有 ws / poll / webhook 三种
+   （见下文「角色与传输」）。ws 经长连接（WebSocket）推送记录变更事件，
+   秒级唤醒；但事件断线不补发、webhook 通知也可能丢，所以每种方式都保留
+   低频（默认 15 分钟）对账扫表。对账是安全网，不是心跳，频率固定低值。
+6. **只出不进。** 节点与 hub 角色只发起出站连接（飞书 API / 长连接），
    不开监听端口、不做端口映射与反向隧道，不把所在局域网暴露给公网。
-   这是节点接入的唯一网络底线。
+   webhook 通知的发起方是飞书多维表格自动化（Tasks 行写入后 POST 对方
+   端点，只带 ID），本项目任何进程既不开监听端口、也不主动推送。这是
+   节点接入的唯一网络底线。
 7. **指令与数据分离＋审批红线。** 任务参数只是数据（首条 instruction
    的 DataPart），指令模板在节点本地；参数里要求改权限、换执行者之类
    的字段一律忽略。对外发消息、删改数据、花钱、提交表单、改权限这类
@@ -67,9 +70,9 @@ flowchart TB
 
 | | 守护进程型 | 协议接入型 |
 |---|---|---|
-| 代表 | 本仓库的 lark-a2a-hub | 只有 API/自动化接入能力的云端 Agent |
+| 代表 | 本仓库的 `hub-node` | 只有 API/自动化接入能力的云端 Agent |
 | 纪律来源 | 代码机械强制（租约、心跳、幂等、重试上限） | 运行手册的文字规则，自觉遵守 |
-| 唤醒 | 长连接事件（或轮询兜底） | 平台自动化 / webhook / 枢纽信号行 |
+| 唤醒 | ws 长连接事件或 poll 轮询，均带对账兜底 | webhook 通知（飞书自动化 POST，只带 ID）/ 枢纽信号行，按手册定期对账 |
 | 已知毛刺 | — | 可能重复写回执或台账行，靠枢纽对账按 ID 去重兜底 |
 
 两种形态走同一套表与状态机（[协议节点运行手册](protocol-node-runbook.md)）。
@@ -77,9 +80,36 @@ flowchart TB
 模板（commands.json）定义——脚本与 Agent 调用同为模板，新增能力＝
 写模板＋自动登记，不改守护进程。
 
+## 角色与传输（标准 v3.1 §10）
+
+- **hub 是逻辑角色，不是独立进程。** 中台只有 node 与 hub 两个角色；
+  实现是 `hub-node daemon --role node|hub`；一台机器要同时承担 hub 与
+  node，起两个守护进程、各用一个配置目录（--config）。
+  hub 角色负责建单（入口 `hub-node task create`，按 instruction 消息
+  → Parts → Tasks 行顺序写；Rules 自动路由仍为计划，目标节点与技能由调用方
+  指定）、发审批卡、回调校验机主、写 auth_decision、写 canceled、结果呈递
+  与陈旧任务告警。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一
+  写方。hub 角色强制 ws 长连接（审批卡回调只能经长连接送达，不允许纯轮询），
+  node 角色可选 ws 或 poll。实现只在 `src/hub/`，由 `hub-node daemon --role hub`
+  跑起来；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。
+- **应用身份。** 默认 hub 一个应用、每台节点一个应用，身份与审计隔离；
+  也可共用一个应用简化部署，代价是平台层面分不清 hub 与 node 的写入、
+  权限按并集开、单机凭据泄露即可冒写 hub 的决定（标准 §10.2）。
+- **三种传输方式**，都只是门铃，内容一律回表拉取：
+
+  | 方式 | 机制 | 适用 |
+  |---|---|---|
+  | ws | 飞书 SDK 长连接事件订阅（出站连接） | 守护进程型节点；hub 角色强制使用 |
+  | poll | 定时扫表，默认 45 秒 | 无法订阅事件时 |
+  | webhook | 飞书自动化在 Tasks 行写入后 POST 对方端点，只带 ID | 协议接入型节点（如 Grok bot） |
+
+  三种方式都保留低频对账扫表兜底（默认 15 分钟）。webhook 的发起方是
+  飞书自动化：端点由对方平台托管，本项目的进程绝不开监听端口、也不
+  主动推送。
+
 ## 一件任务的生命周期
 
-1. 枢纽按 Rules 与 AgentCards 选定目标节点，先写 instruction 消息与
+1. hub 角色按 Rules 与 AgentCards 选定目标节点，先写 instruction 消息与
    Parts（参数在 DataPart），**最后写 Tasks 行**（submitted）。
 2. 节点被事件唤醒（或对账扫到），校验能力与幂等键，置 working、写
    Claimed_By 与心跳，Runs 开行。
@@ -87,7 +117,7 @@ flowchart TB
    Outcome=paused 关行；枢纽把问题呈递给操作者，答复以 answer 消息
    追加在**原任务**上，节点续跑——禁止为答复新开任务。
 4. 需要批准：写 auth_request → 置 auth-required；枢纽发审批卡，
-   操作者决定后枢纽写 auth_decision（DataPart 载决定）并回置
+   操作者决定后 hub 角色写 auth_decision（DataPart 载决定）并回置
    submitted，节点才执行；驳回则 canceled。
 5. 交付：产物登记 Artifacts（内容为其 FilePart）→ 写 result 消息 →
    置 completed，Runs 以 succeeded 关行。
