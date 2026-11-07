@@ -161,14 +161,12 @@ if (cmd === "setup") {
     console.error(e.message);
     process.exitCode = 1;
   }
-  if (role) try {
+  if (role === "hub") {
+    console.error("lah reconcile 只支持节点一次对账；hub 请继续用 lah daemon --role hub");
+    process.exitCode = 2;
+  } else if (role) try {
     const cfg = loadConfig(path.resolve(configDirFrom(rest)));
-    if (role === "hub") {
-      console.error("lah reconcile 只支持节点一次对账；hub 请继续用 lah daemon --role hub");
-      process.exitCode = 2;
-    } else {
-      await new Kernel(cfg).run({ once: true });
-    }
+    await new Kernel(cfg).run({ once: true });
   } catch (e) {
     console.error("reconcile 失败：" + e.message);
     process.exitCode = 1;

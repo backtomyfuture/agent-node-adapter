@@ -28,8 +28,16 @@ export function parseFlags(argv) {
     else if (a === "--service") f.service = true;
     else if (a === "--skip-skill") f.skipSkill = true;
     else if (a === "--help" || a === "-h") f.help = true;
-    else if (a === "--wake") f.wake = argv[++i];
-    else if (a.startsWith("--wake=")) f.wake = a.slice("--wake=".length);
+    else if (a === "--wake") {
+      f.wakeSeen = true;
+      const next = argv[i + 1];
+      if (next == null || next === "" || String(next).startsWith("--")) f.wakeMissing = true;
+      else { f.wake = next; i++; }
+    } else if (a.startsWith("--wake=")) {
+      f.wakeSeen = true;
+      f.wake = a.slice("--wake=".length);
+      if (!String(f.wake ?? "").trim()) f.wakeMissing = true;
+    }
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
@@ -763,6 +771,10 @@ export async function runSetup(configDir, argv, appDir) {
   if (flags.help) {
     console.log(setupHelpText());
     return 0;
+  }
+  if (flags.wakeMissing) {
+    console.error("  ✗ --wake 缺少值（应为 poll、event/ws 或 sweep）。协议节点的 automation 只能手工登记名片。");
+    return 2;
   }
   let wakeFlag = "";
   try {
