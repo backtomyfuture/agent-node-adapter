@@ -19,7 +19,7 @@ import { service } from "./service.mjs";
 const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "AgentCards"];
 const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
 
-function parseFlags(argv) {
+export function parseFlags(argv) {
   const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -27,6 +27,17 @@ function parseFlags(argv) {
     else if (a === "--force") f.force = true;
     else if (a === "--service") f.service = true;
     else if (a === "--skip-skill") f.skipSkill = true;
+    else if (a === "--help" || a === "-h") f.help = true;
+    else if (a === "--wake") {
+      f.wakeSeen = true;
+      const next = argv[i + 1];
+      if (next == null || next === "" || String(next).startsWith("--")) f.wakeMissing = true;
+      else { f.wake = next; i++; }
+    } else if (a.startsWith("--wake=")) {
+      f.wakeSeen = true;
+      f.wake = a.slice("--wake=".length);
+      if (!String(f.wake ?? "").trim()) f.wakeMissing = true;
+    }
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
@@ -729,8 +740,49 @@ async function askHidden(rl, prompt) {
   }
 }
 
+
+export function setupHelpText() {
+  return `用法：
+  lah setup [--yes] [--config <dir>] [--role node|hub] [--kind host|agent]
+            [--wake poll|event|sweep] [--skip-skill] [--force]
+            [--node <名>] [--zone <区>] [--prefix <前缀>] [--desc <描述>]
+            [--base <token>] [--app-id <id>] [--owner <open_id>]
+
+  --wake    非交互时选择唤醒方式：event/ws、poll、sweep
+            sweep 登记 poll，轮询间隔不超过对账周期 900 秒。
+            automation 只属于手工登记的协议接入型节点，setup 不产出。
+  --help    打印本帮助并退出，不进入向导，也不读取凭据`;
+}
+
+export function normalizeWake(raw) {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "1" || s === "ws" || s === "event") return "1";
+  if (s === "2" || s === "poll") return "2";
+  if (s === "3" || s === "sweep") return "3";
+  if (s === "automation") {
+    throw new Error("守护进程不能登记 automation。协议接入型节点的 Receive_Mode=automation 只能手工登记名片；--wake 请用 poll、event/ws 或 sweep");
+  }
+  throw new Error(`未知 --wake：${raw}（应为 poll、event/ws 或 sweep）`);
+}
+
 export async function runSetup(configDir, argv, appDir) {
   const flags = parseFlags(argv);
+  if (flags.help) {
+    console.log(setupHelpText());
+    return 0;
+  }
+  if (flags.wakeMissing) {
+    console.error("  ✗ --wake 缺少值（应为 poll、event/ws 或 sweep）。协议节点的 automation 只能手工登记名片。");
+    return 2;
+  }
+  let wakeFlag = "";
+  try {
+    wakeFlag = flags.wake ? normalizeWake(flags.wake) : "";
+  } catch (e) {
+    console.error("  ✗ " + e.message);
+    return 2;
+  }
   const role = flags.role || "node";
   if (role !== "node" && role !== "hub") {
     console.error(`  ✗ --role 只能是 node 或 hub，收到：${role}`);
@@ -1041,20 +1093,24 @@ export async function runSetup(configDir, argv, appDir) {
         console.log("\n  选择节点的任务唤醒机制（标准 v3.1 §10.3）：");
         console.log(`    1. ws${allEventsReady ? "（推荐）" : "（两层事件订阅未全就绪，需补齐后方可秒级唤醒）"}：长连接秒级事件唤醒 ＋ 15分钟对账兜底`);
         console.log("    2. poll：45秒固定短轮询 ＋ 15分钟对账兜底（无需事件订阅）");
-        console.log("    3. sweep / automation：仅15分钟对账扫表（或依赖飞书多维表格自动化出站通知）");
-        wakeChoice = await ask("选择唤醒方式序号", defaultWake);
+        console.log("    3. sweep：轮询间隔不超过对账周期（900秒），名片登记 poll");
+        wakeChoice = await ask("选择唤醒方式序号", wakeFlag || defaultWake);
       } else {
-        wakeChoice = defaultWake;
+        wakeChoice = wakeFlag || defaultWake;
       }
 
       if (wakeChoice === "1" || /ws/i.test(wakeChoice)) {
         events = true;
         pollSec = 45;
         console.log("  ✓ 唤醒方式：长连接（ws）秒级事件 ＋ 15分钟对账兜底");
-      } else if (wakeChoice === "3" || /sweep|automation/i.test(wakeChoice)) {
+      } else if (/automation/i.test(String(wakeChoice))) {
+        console.error("  ✗ automation 不能由守护进程登记。协议接入型节点的 Receive_Mode=automation 只能手工登记名片。");
+        return 2;
+      } else if (wakeChoice === "3" || /^sweep$/i.test(String(wakeChoice).trim())) {
         events = false;
-        pollSec = sweepSec; // 900s
-        console.log("  ✓ 唤醒方式：仅15分钟低频对账扫表（sweep / automation）");
+        // 标准 §10.3：poll 的间隔不得长于对账周期（900 秒）。
+        pollSec = Math.min(sweepSec, 900);
+        console.log("  ✓ 唤醒方式：poll，间隔不超过对账周期 900 秒（sweep）");
       } else {
         events = false;
         pollSec = 45;
@@ -1096,7 +1152,7 @@ export async function runSetup(configDir, argv, appDir) {
       nodeDesc: nodeDesc || "",
       appEnv: appEnvPath,
       baseToken,
-      pollSec, // 修复 B10：使用前面分支算出的 pollSec 变量，sweep/automation 模式下为 900s，不再硬编码 45
+      pollSec, // sweep 也走这个变量：不超过对账周期，名片仍由 receiveModeOf 登记为 poll
       sweepSec: 900,
       events,
       doorbellFile: null,

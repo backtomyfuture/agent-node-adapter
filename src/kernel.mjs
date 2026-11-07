@@ -157,6 +157,14 @@ export function loadConfig(configDir) {
   };
 }
 
+
+export function receiveModeOf(cfg) {
+  // 标准 §6 / §10.3：守护进程只登记 event 或 poll。
+  // automation 只给协议接入型节点，而且只能来自手工名片，不能由本函数产出。
+  if (cfg?.events || cfg?.doorbellFile) return "event";
+  return "poll";
+}
+
 export class Kernel {
   constructor(cfg) {
     this.cfg = cfg;
@@ -659,7 +667,7 @@ export class Kernel {
   }
 
   desiredCard(skill, entry, carrierUp) {
-    const receiveMode = this.cfg.events || this.cfg.doorbellFile ? "event" : "poll";
+    const receiveMode = receiveModeOf(this.cfg);
     const isInbox = entry?.mode === "inbox";
     const desc = isInbox ? (entry?.desc || `${this.cfg.node} 独立 Agent 本尊`) : (entry?.desc ?? "");
     return {
@@ -709,18 +717,25 @@ export class Kernel {
         if (k === "Cap_ID") continue;
         if (String(f1(row, k) ?? "") !== String(v ?? "")) upd[k] = v;
       }
-      if (this.cfg.nodeDesc && !f1(row, "Node_Desc")) upd.Node_Desc = this.cfg.nodeDesc;
+      if (this.cfg.nodeDesc && String(f1(row, "Node_Desc") ?? "") !== String(this.cfg.nodeDesc)) {
+        upd.Node_Desc = this.cfg.nodeDesc;
+      }
       if (Object.keys(upd).length) {
         await this.bus.updateRecord(this.T.agentCards, row.record_id, upd);
       }
     }
-    for (const row of rows) {
-      if (f1(row, "Node") !== this.cfg.node) continue;
-      const capId = f1(row, "Cap_ID");
-      if (wanted.has(capId)) continue;
-      if (f1(row, "Dispatchable") === "No") continue;
-      await this.bus.updateRecord(this.T.agentCards, row.record_id, { Dispatchable: "No" });
-      log("capability removed from commands, Dispatchable=No " + capId);
+    // lah reconcile 是一次性对账。协议节点的名片手工登记，命令表经常是空的。
+    // 这种模式不得写 Dispatchable=No，也不得改写命令表里没有的名片。
+    // 常驻 daemon 仍把已从命令表删除的能力停派。
+    if (!this._reconcileOnce) {
+      for (const row of rows) {
+        if (f1(row, "Node") !== this.cfg.node) continue;
+        const capId = f1(row, "Cap_ID");
+        if (wanted.has(capId)) continue;
+        if (f1(row, "Dispatchable") === "No") continue;
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, { Dispatchable: "No" });
+        log("capability removed from commands, Dispatchable=No " + capId);
+      }
     }
     const next = new Map();
     for (const [capId, fields] of wanted) next.set(capId, { ...fields });
@@ -1032,7 +1047,7 @@ export class Kernel {
     if (!(await this.findBy(this.T.messages, "Msg_ID", box.msgId))) {
       const fields = {
         Msg_ID: box.msgId, Task_ID: box.taskId, Context_ID: f1(task, "Context_ID"),
-        From_Node: this.cfg.node, To_Node: "hub", Role: "agent",
+        From_Node: this.cfg.node, To_Node: await this.initiatorOf(task), Role: "agent",
         Kind: failed ? "notice" : "result",
         Artifact_Ref: box.artId || "", In_Reply_To: "", Created_At: nowShort(),
       };
@@ -1480,12 +1495,25 @@ export class Kernel {
 
   startEventReceiver() {
     this.waker?.stop();
-    this.waker = createWaker(this.cfg, {
+    this.waker = null;
+    // 停止请求可能落在创建唤醒器之前。这时不要再打开长连接。
+    if (this._stopping) return;
+    const waker = createWaker(this.cfg, {
       extraHandlers: this.cfg.extraHandlers ?? {},
       onStatus: (up) => { this._wsUp = up; },
       log,
     });
-    this.waker.start(() => { this._wakeFlag = true; });
+    this.waker = waker;
+    if (this._stopping) {
+      waker.stop?.();
+      this.waker = null;
+      return;
+    }
+    waker.start(() => { this._wakeFlag = true; });
+    if (this._stopping) {
+      waker.stop?.();
+      this.waker = null;
+    }
   }
 
   async sweepOnce() {
@@ -1528,24 +1556,68 @@ export class Kernel {
     }
   }
 
-  async run() {
-    log(`node daemon ${DAEMON_VERSION} starting on ${this.cfg.node}`);
+  requestStop() {
+    this._stopping = true;
+    this._wakeFlag = true;
+    this.waker?.stop();
+  }
+
+  async markOffline() {
+    let rows;
+    try {
+      rows = await this.bus.listRecords(this.T.agentCards);
+    } catch (e) {
+      log("mark offline failed: " + (e?.message ?? e));
+      return;
+    }
+    for (const row of rows) {
+      const capId = f1(row, "Cap_ID") || row.record_id;
+      try {
+        if (f1(row, "Node") !== this.cfg.node) continue;
+        if (String(f1(row, "Availability") ?? "").toLowerCase() === "offline") continue;
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, { Availability: "offline" });
+        log("card offline on shutdown " + capId);
+      } catch (e) {
+        log("mark offline failed: " + (e?.message ?? e) + " " + capId);
+      }
+    }
+  }
+
+  async run({ once = false } = {}) {
+    log(`node daemon ${DAEMON_VERSION} starting on ${this.cfg.node}${once ? " (once)" : ""}`);
     // 常驻进程的第一原则：启动期任何一步失败都不许死，进主循环重试。
     try { await this.bus.tenantToken(); } catch (e) {
       log("initial token failed (will retry in loop): " + e.message);
     }
-    this.startEventReceiver();
     this._capsReady = false;
+    this._reconcileOnce = once === true;
+    if (once) {
+      try {
+        await this.sweepOnce();
+      } catch (e) {
+        log("poll error: " + e.message);
+        throw e;
+      }
+      return;
+    }
+    if (this._stopping) {
+      await this.markOffline();
+      return;
+    }
+    this.startEventReceiver();
     for (;;) {
       // 唤醒标志在扫表前消费：本次扫表会看到最新状态，扫表之后
       // 再到的事件由 waitWake 立刻响应，不会被误清。
+      if (this._stopping) break;
       this._wakeFlag = false;
       try {
         await this.sweepOnce();
       } catch (e) {
         log("poll error: " + e.message);
       }
+      if (this._stopping) break;
       await this.waitWake();
     }
+    await this.markOffline();
   }
 }

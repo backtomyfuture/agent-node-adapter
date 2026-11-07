@@ -132,3 +132,21 @@ lah inbox fail --task <Task_ID> --text "<失败原因说明>"
 ```bash
 lah doctor
 ```
+
+### 7. 协议节点单次对账与只读盘点
+无法长驻 daemon 的外部节点（例如 Grok Bot）收到 webhook 门铃后，或每 15 分钟兜底时，跑一次：
+```bash
+lah reconcile
+```
+它会复用内核扫表：认领 `submitted` 任务、续跑 `input-required`、刷新心跳，然后退出，不长驻。`--once` 可写可不写，行为相同。单次对账**不会**把命令表里没有的手工名片写成停派，也**不会**把名片标成 offline，避免下一单被建单侧拒绝。协议节点要 `Receive_Mode=automation`，只能手工登记名片；setup 不会产出 automation。
+
+查看本节点名片与任务是否和本地配置偏离（只读，不写入）：
+```bash
+lah inventory
+```
+
+非交互安装可选唤醒方式：
+```bash
+lah setup --yes --wake sweep
+```
+`sweep` 把 `pollSec` 设为不超过 900 秒，名片 `Receive_Mode` 登记为 `poll`。`automation` 不是合法的 `--wake` 值。

@@ -6,6 +6,8 @@
 //            省略 --role 时读 node.json 的 role，再缺省 node。
 //   task     task create：hub 角色建单。先写 instruction 与 Parts，最后写 Tasks 行。
 //   doctor   本机自检：配置、凭据、总线连通、能力登记、自启状态（M3）
+//   inventory 只读盘点本节点名片与任务，不写入
+//   reconcile 单次回表认领/对账后退出（webhook 或 15 分钟兜底；不停派手工名片）
 //            --probe <host:port> 经在线 carrier 做一次只读 TCP 探测
 //   service  注册/卸载开机自启：macOS launchd / Linux systemd 用户级（M3）
 //   host     carrier 语境进程：在用户终端里常驻，替守护进程代跑需要
@@ -151,6 +153,32 @@ const [cmd, ...rest] = process.argv.slice(2);
 if (cmd === "setup") {
   const { runSetup } = await import("../src/setup.mjs");
   process.exitCode = await runSetup(configDirFrom(rest), rest, APP_DIR);
+} else if (cmd === "reconcile") {
+  let role;
+  try {
+    role = roleForTool(rest);
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
+  if (role === "hub") {
+    console.error("lah reconcile 只支持节点一次对账；hub 请继续用 lah daemon --role hub");
+    process.exitCode = 2;
+  } else if (role) try {
+    const cfg = loadConfig(path.resolve(configDirFrom(rest)));
+    await new Kernel(cfg).run({ once: true });
+  } catch (e) {
+    console.error("reconcile 失败：" + e.message);
+    process.exitCode = 1;
+  }
+} else if (cmd === "inventory") {
+  try {
+    const { inventory } = await import("../src/inventory.mjs");
+    process.exitCode = await inventory(configDirFrom(rest));
+  } catch (e) {
+    console.error("inventory 失败：" + e.message);
+    process.exitCode = 1;
+  }
 } else if (cmd === "daemon") {
   let role;
   try {
@@ -160,13 +188,38 @@ if (cmd === "setup") {
     process.exitCode = 1;
   }
   let release;
-  const onSignal = (signal) => process.exit(signal === "SIGINT" ? 130 : 143);
+  let kernel = null;
+  let hubRuntime = null;
+  let signalCode;
+  const onSignal = (signal) => {
+    const code = signal === "SIGINT" ? 130 : 143;
+    const ts = new Date().toISOString().slice(0, 19);
+    if (signalCode != null) {
+      console.error(`${ts} 再次收到 ${signal}，直接退出`);
+      process.exit(code);
+    }
+    signalCode = code;
+    if (kernel) {
+      console.error(`${ts} 收到 ${signal}，正在停止并标记 offline`);
+      kernel.requestStop();
+      return;
+    }
+    if (hubRuntime) {
+      console.error(`${ts} 收到 ${signal}，hub 关闭长连接并退出`);
+      try { hubRuntime.stop(); }
+      catch (e) { console.error(`${ts} hub 停止失败：` + (e?.message ?? e)); }
+      return;
+    }
+    // hub 路径在 lah 里不持有 Kernel；运行时还没建好时也要能退出。
+    console.error(`${ts} 收到 ${signal}，守护进程退出`);
+    process.exit(code);
+  };
   if (role) try {
     const configDir = path.resolve(configDirFrom(rest));
     release = acquireDaemonLock(configDir);
     process.once("exit", release);
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
     let cfg = null;
     try {
       cfg = loadConfig(configDir);
@@ -180,9 +233,12 @@ if (cmd === "setup") {
     }
     if (cfg && role === "hub") {
       const { runHub } = await import("../src/hub/index.mjs");
-      await runHub(cfg);
+      await runHub(cfg, undefined, { onRuntime(rt) { hubRuntime = rt; } });
+      if (signalCode != null) process.exitCode = signalCode;
     } else if (cfg) {
-      await new Kernel(cfg).run();
+      kernel = new Kernel(cfg);
+      await kernel.run();
+      if (signalCode != null) process.exitCode = signalCode;
     }
   } catch (e) {
     console.error("daemon 启动失败：" + e.message);
@@ -517,8 +573,10 @@ if (cmd === "setup") {
 } else {
   console.log(`lah ${DAEMON_VERSION}
 用法：
-  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--skip-skill]  一键配置向导（首次装机跑这个）
+  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--wake poll|event|sweep] [--skip-skill]  一键配置向导（sweep 登记 poll，间隔不超过 900 秒）
   lah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
+  lah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）
+  lah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
   lah host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）

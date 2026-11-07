@@ -80,6 +80,7 @@ const NOTES = {
     Availability: "（扩展）online / work-hours / offline 等在册状态",
     Receive_Mode: "（扩展）唤醒方式：event / poll / automation / webhook",
     Side_Effect: "（扩展）read / write / external，决定默认审批等级",
+    Metadata: "A2A 原生自由字段（JSON）；内核登记写入 {kind, mode}，可为空",
   },
   "Rules_路由规则": {
     Match_Type: "按 Skill_ID 或标签匹配",
