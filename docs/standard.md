@@ -1,6 +1,6 @@
 # 多 Agent 中台标准（A2A 数据模型版，v3.1 形态 B）
 
-> 现行标准，版本 v3.1。来源：A2A（Agent2Agent）协议 v1.0 数据模型
+> 现行标准，版本 v3.4.1。来源：A2A（Agent2Agent）协议 v1.0 数据模型
 > （Google 牵头、Linux Foundation 托管）＋生产实测经验汇总。
 > 表结构见 [Base 结构](base-schema.md)；系统设计见 [架构](architecture.md)。
 
@@ -111,9 +111,10 @@
 - ~~Receipt~~：**删除**。resolve/ask/notice/later 的沟通语义由 Tasks 状态＋Messages 承担；执行方要说话，去 Messages 写。
 - ~~Summary~~：**删除**。执行内部备注如需保留，写 Run 的 Error_Log 或本机日志，不进中台。
 - 重试沿用 v1：执行失败且 Retry_Count<2 回 submitted 重认领；心跳超时回收与执行失败共用同一 Retry_Count 预算（§8.4）。
-- **执行与提交分开算**：计入重试的「执行失败」只指执行本身失败（命令非零退出、超时）。执行已成功之后的两类问题不计入重试、不重新执行、不重做副作用：
+- **执行与提交分开算**：计入重试的「执行失败」只指执行本身失败（命令非零退出、超时）。以下情况不计入重试、不重新执行、不重做副作用：
   - 回执无效（无法按 §9 回执约定解析）：直接 Status=failed＋notice 说明原因（附原始输出摘要），Runs 记 failed；
-  - 提交失败（向总线登记产物、写 Runs、写消息或改状态中途失败）：只补齐未完成的提交，已写入的行按其 ID 查重、不重复追加；补齐完成后按原回执进入应有状态。
+  - 提交失败（向总线登记产物、写 Runs、写消息或改状态中途失败）：只补齐未完成的提交，已写入的行按其 ID 查重、不重复追加；补齐完成后按原回执进入应有状态；
+  - 独立 Agent 宣告失败（`lah inbox fail`，见 §10.4）：由 Agent 本尊明确做出无法完成的判断，直接 Status=failed＋notice，Runs 记 failed，不重试、不回 submitted。
 
 ## 5. Artifacts 规范（v2 新增表）
 
@@ -134,6 +135,7 @@
 - Skill_ID（skill.id）/ Skill_Name（skill.name）/ Description（skill.description，v3 由 Capability 改名）/ Tags / Examples / Input_Modes / Output_Modes（skill 级元数据）。
 - Default_Input_Modes / Default_Output_Modes（卡片级默认模式）。
 - Cap_Streaming / Cap_Push / Cap_State_History（卡片 capabilities 三开关；Cap_Push＝支持推送通知，相当于声明有 PushNotification 通道）。
+- Metadata：A2A 原生自由字段（文本，JSON 字符串）。内核登记名片时写入 `kind` 与 `mode`（节点类型与执行模式，见 §10.4 与 §9），供建单侧识别该能力；协议节点手工登记的名片，以及尚未填写的旧名片，可以留空。
 
 本地扩展字段：Cap_ID（行主键）、Zone、Required_Assets、Side_Effect、Availability、Dispatchable、Receive_Mode（唤醒方式，与 §10.3 三种传输方式对应：`event`＝ws 长连接事件 / `poll` 轮询 / `automation`＝webhook 通知（飞书自动化 POST）。`automation` 只用于协议接入型节点，其端点由对方平台托管；守护进程型节点只取 `event` 或 `poll`，本标准的实现不开监听端口。表中另有遗留选项 `webhook`，不再赋予含义，登记一律用 `automation`）。
 
@@ -157,7 +159,7 @@
 ### 8.2 派生与熔断
 
 - 子任务 Hop_Count＝父任务＋1；**Hop_Count>8 熔断**（全局统一口径；各节点原有更严口径的归并须经其操作者确认后生效）。
-- 派生任务共享 Context_ID，来源以首条 instruction 消息的 Ref_Task_IDs 注明（v3 起写消息级）。
+- 派生任务共享 Context_ID，来源以首条 instruction 消息的 Ref_Task_IDs 注明（v3 起写消息级）。未显式给出 `--context` 时，单个父任务默认继承该父任务的 Context_ID；多个父任务的 Context_ID 一致时继承该值，不一致时建单入口在第一笔写之前拒绝，并要求显式 `--context`。显式 `--context` 以调用方给出的值为准。
 
 ### 8.3 审批（auth-required）
 
@@ -192,6 +194,12 @@
 - **呈递去重**按「任务＋当前 Status_Msg」即 (Task_ID, Status_Msg) 计，终态再带上 Status。同一任务每出现一条新的 question / auth_request 都是新的呈递项，答复续跑或批准后到达的终态结果也要再呈递一次。已呈递的 Msg_ID 记在 Tasks.Metadata；Presented 只表示该任务当前状态是否已呈递，不能单独作为去重依据。初次装机或初次启动时，若本地呈递状态不存在，自动以线上存量终态或已呈递任务建立装机水位线（Baseline），避免向本地队列倾倒全部历史已完成任务。
 
 ## 修订记录
+
+**v3.4.1（2026-11-07，AgentCards.Metadata、建单拒派与派生会话）**：
+- §6 增加 AgentCards.Metadata：A2A 原生自由字段，文本，存 JSON 字符串；内核登记时写入 `kind` 与 `mode`，手工名片与旧名片可留空。表结构因此新增一列；线上 Base 加列后重新生成 schema，不手改生成物。
+- §10.1：`lah task create` 在自动挑选能力，以及显式指定 Cap_ID 或 Skill_ID 时，拒绝 `Dispatchable=No` 或 `Availability=offline` 的名片；没有可用能力同样拒绝。拒绝发生在第一笔写之前，并给出明确错误。
+- §8.2：未显式给出 `--context` 时，单父派生默认继承父 Context_ID；多个父任务的 Context_ID 不一致时，建单入口在第一笔写之前拒绝，并要求显式 `--context`。
+- §10.4 补充 inbox fail 语义：明确 `lah inbox fail` 是 Agent 本尊宣告无法完成，属于判断而非临时故障，直接置 failed 并写 notice、关账 Runs，不重试、不回 submitted、不计入 Retry_Count，与内核命令重试严格区分。
 
 **v3.4（2026-11-07，节点类型区分 host 与 agent、异步 inbox 执行模式）**：
 - 节点配置 `node.json` 引入 `kind: "host" | "agent"`（缺省 host，向下兼容）。
@@ -242,7 +250,7 @@
 - 实现是 Node 版 `lah daemon --role node|hub`（命令 `hub-node` 兼容别名可用）。省略 `--role` 时读该进程配置目录里 `node.json` 的 `role`，缺省为 node。单进程、单配置目录即可同时承载干活与枢纽职责，无需再拆两个进程与配置目录。
 - hub 角色的职责：
   1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务（含定时任务）；
-  2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能，省略技能时由中台按目标节点在 AgentCards 登记的名片自动挑选首选技能，亦可通过 --cap 反查目标节点）；
+  2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能，省略技能时由中台按目标节点在 AgentCards 登记的名片自动挑选首选技能，亦可通过 --cap 反查目标节点）。自动挑选与显式指定 Cap_ID 或 Skill_ID 时，只接受 `Dispatchable=Yes` 且 `Availability` 不是 `offline` 的名片；命中 `Dispatchable=No` 或 `Availability=offline`，或没有可用能力时，必须在第一笔写之前拒绝，并给出明确错误；
   3. 审批中继：给机主发审批卡；处理卡片回调时校验操作者是机主本人；通过后写 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg），并按决定把任务置回 submitted 或置 canceled（§8.3）；
   4. 取消：写 canceled（审批驳回，或代发起方落表取消请求）；
   5. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；飞书端只发审批卡，不发大段文本刷屏；
@@ -293,6 +301,11 @@
      - 守护进程认领任务（置 `working`，`Claimed_By` 为本节点）后，将任务数据（Task_ID、Title、From_Node、指令正文、params、历史问答）写入本地 `agent_inbox.jsonl`（600 权限），**任务保持 `working` 状态，不关闭、不起子进程**；
      - 守护进程负责持续刷新 `Heartbeat_At`，避免 20 分钟租约超时；可配置 `inbox_timeout_sec`（缺省 86400 秒），超时自动置 `failed` + notice「本尊超时未处理」；
      - Agent 本尊在每轮循环或启动时调用 `lah inbox [--pop]` 读取待办；处理完成后调用 `lah inbox done`（完成并原路回执）、`lah inbox ask`（提问待答）或 `lah inbox fail`；
+     - **`lah inbox fail` 语义与失败终态**：
+       - `lah inbox fail --task <ID> --text <原因>` 表示 Agent 本尊明确宣告无法完成该任务。参数 `--text <原因>` 为必填；执行后向 Messages 追加一条 `Role=agent` 的 `notice` 消息（正文记录失败原因，`To_Node` 原路指向发起方首条 instruction 的 `From_Node`，回退 `Source` || `"hub"`），当前 Runs 以 `Outcome=failed`、`Finished_At`、`Error_Log` 关账，任务状态直接置为 `failed`；**不重试**，不回 `submitted`，不计入 `Retry_Count`；
+       - **与内核命令失败重试的区别**：内核（host 模式）拉起本地命令时，命令崩溃/进程非零退出、执行超时或无心跳被回收属于偶发临时故障，在 `MAX_RETRIES`（默认 2 次）上限内会清空 `Claimed_By` 并重置为 `submitted` 供重新认领重试；而 `lah inbox fail` 是由 Agent 本尊根据任务内容、自身能力边界或外部约束做出的业务与能力判断，属于确定性结论而非临时故障，重试无法改变结果，故直接进入终态；
+       - **区分提问（ask）与失败（fail）**：Agent 若因缺少必要信息、需要机主确认或参数模糊而暂时无法继续，应使用 `lah inbox ask` 转入 `input-required` 等待答复续跑，而不是使用 `fail`；一旦调用 `fail`，任务进入不可逆终态（A2A 终态不可变，禁止重开）。若发起方想在失败后调整要求重新尝试，必须在同一 `Context_ID` 下新建任务，新任务首条 instruction 的 `Ref_Task_IDs` 指回原任务；
+       - **超时未处理**：若任务进入 inbox 后超过 `inbox_timeout_sec`（缺省 86400 秒）未被 Agent 本尊处理，守护进程负责超时关账，直接将任务置为 `failed` 并写 `notice`「本尊超时未处理」，Runs 记 `failed`，同样不计入重试；
      - 发起方答复后，中台自动将任务重新放回本地 inbox（状态变回 `pending`，追加最新 answer），本尊即可续跑。
    - **双向对称**：作为发起方时，结果仍经 `present_queue.jsonl` 原路返回；独立 Agent 节点只需在交互开头跑 `lah present --pop`（收自己派出去的结果）和 `lah inbox --pop`（接派给自己的活）。
 
