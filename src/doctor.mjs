@@ -54,9 +54,10 @@ async function probeLan(socketPath, host, port) {
 }
 
 function richPath() {
-  const extra = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local/bin")];
-  const cur = (process.env.PATH || "").split(path.delimiter);
-  return [...new Set([...extra, ...cur])].join(path.delimiter);
+  // 优先尊重外部传入的 PATH（允许测试通过 PATH 模拟缺少 lark-cli）；若未设置则兜底常用路径
+  if (process.env.PATH != null) return process.env.PATH;
+  const extra = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local/bin"), "/usr/bin", "/bin"];
+  return extra.join(path.delimiter);
 }
 
 function getLarkVersion() {
@@ -198,8 +199,13 @@ export async function doctor(configDir, appDir, opts = {}) {
   else { bad("依赖未安装：在 app 目录跑 npm install"); problems++; }
 
   const larkVer = getLarkVersion();
+  // hub 角色强制长连接；node 角色仅在开启事件订阅（默认或显式 events: true）时才需要 lark-cli
+  // 做云文档事件订阅检查与注册；纯 REST / 轮询 / 协议节点（events: false）降级为 info 提示。
+  const needsLarkCli = role === "hub" || raw?.events !== false;
   if (larkVer) ok(`lark-cli 已安装（${larkVer}）`);
-  else {
+  else if (!needsLarkCli) {
+    info("未发现 lark-cli（当前为轮询/协议节点，无需此依赖；若需长连接 ws 门铃可运行 npm install -g @larksuite/cli 安装）");
+  } else {
     bad("未发现 lark-cli：请运行 npm install -g @larksuite/cli 安装");
     problems++;
   }
@@ -269,21 +275,25 @@ export async function doctor(configDir, appDir, opts = {}) {
 
       let isSubscribed = false;
       let checkErr = null;
-      try {
-        const out = execFileSync("lark-cli", [
-          "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
-          "--params", JSON.stringify({ file_type: "bitable" }),
-          "--as", "user",
-          "--json",
-        ], { encoding: "utf8", env: { ...process.env, PATH: richPath() } });
-        const parsed = JSON.parse(out);
-        if (parsed?.data?.is_subscribe === true) {
-          isSubscribed = true;
-        } else {
-          checkErr = parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "is_subscribe=false" : out.trim());
+      if (!larkVer) {
+        checkErr = "未发现 lark-cli";
+      } else {
+        try {
+          const out = execFileSync("lark-cli", [
+            "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
+            "--params", JSON.stringify({ file_type: "bitable" }),
+            "--as", "user",
+            "--json",
+          ], { encoding: "utf8", env: { ...process.env, PATH: richPath() } });
+          const parsed = JSON.parse(out);
+          if (parsed?.data?.is_subscribe === true) {
+            isSubscribed = true;
+          } else {
+            checkErr = parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "is_subscribe=false" : out.trim());
+          }
+        } catch (e) {
+          checkErr = e.message;
         }
-      } catch (e) {
-        checkErr = e.message;
       }
 
       if (isSubscribed) {
@@ -331,10 +341,12 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
     if (role === "hub") {
       info(`唤醒方式：长连接（ws，表变更门铃 + card.action.trigger）＋ ${cfg.sweepSec}s 对账扫表（hub 角色强制长连接）`);
+    } else if (cfg.events) {
+      info(`唤醒方式：事件订阅（长连接 ws）＋ ${cfg.sweepSec}s 对账兜底`);
+    } else if (cfg.pollSec >= cfg.sweepSec) {
+      info(`唤醒方式：仅对账间隔 ${cfg.sweepSec}s（事件订阅已关）`);
     } else {
-      info(cfg.events
-        ? `唤醒方式：事件订阅（长连接 ws）＋ ${cfg.sweepSec}s 对账兜底`
-        : `唤醒方式：轮询（poll）${cfg.pollSec}s（事件订阅已关）`);
+      info(`唤醒方式：轮询（poll）${cfg.pollSec}s（事件订阅已关）`);
     }
     // carrier 语境（设计 §9）：有 context=carrier 的能力，或显式 --probe 时才检查。
     // socket 探活成功只说明本机 carrier 在听，不宣称局域网可达。

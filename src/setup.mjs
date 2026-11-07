@@ -20,12 +20,13 @@ const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "Age
 const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
 
 function parseFlags(argv) {
-  const f = { yes: false, force: false, service: false, role: "node", kind: "" };
+  const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") f.yes = true;
     else if (a === "--force") f.force = true;
     else if (a === "--service") f.service = true;
+    else if (a === "--skip-skill") f.skipSkill = true;
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
@@ -1095,7 +1096,7 @@ export async function runSetup(configDir, argv, appDir) {
       nodeDesc: nodeDesc || "",
       appEnv: appEnvPath,
       baseToken,
-      pollSec: 45,
+      pollSec, // 修复 B10：使用前面分支算出的 pollSec 变量，sweep/automation 模式下为 900s，不再硬编码 45
       sweepSec: 900,
       events,
       doorbellFile: null,
@@ -1192,16 +1193,21 @@ export async function runSetup(configDir, argv, appDir) {
       }
     }
 
-    // 自动为本机 Agent 安装 lah 技能
-    try {
-      const skillSrc = path.join(appDir, "skills", "lah", "SKILL.md");
-      const skillDestDir = path.join(os.homedir(), ".agents", "skills", "lah");
-      if (fs.existsSync(skillSrc)) {
-        fs.mkdirSync(skillDestDir, { recursive: true });
-        fs.copyFileSync(skillSrc, path.join(skillDestDir, "SKILL.md"));
-        console.log(`  ✓ 已自动安装 lah Skill 至 ${path.join(skillDestDir, "SKILL.md")}`);
-      }
-    } catch {}
+    // 自动为本机 Agent 安装 lah 技能（支持 --skip-skill 或 LAH_SKIP_SKILL=1 跳过）
+    const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.LAH_SKIP_SKILL || "").toLowerCase());
+    if (!shouldSkipSkill) {
+      try {
+        const skillSrc = path.join(appDir, "skills", "lah", "SKILL.md");
+        const skillDestDir = path.join(os.homedir(), ".agents", "skills", "lah");
+        if (fs.existsSync(skillSrc)) {
+          fs.mkdirSync(skillDestDir, { recursive: true });
+          fs.copyFileSync(skillSrc, path.join(skillDestDir, "SKILL.md"));
+          console.log(`  ✓ 已自动安装 lah Skill 至 ${path.join(skillDestDir, "SKILL.md")}`);
+        }
+      } catch {}
+    } else {
+      console.log("  · 跳过安装 lah Skill（--skip-skill）");
+    }
 
     // 6. 自检
     let dc = await doctor(configDir, appDir, { role });

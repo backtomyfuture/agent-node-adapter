@@ -9,6 +9,20 @@
 # 重跑本脚本 = 更新程序（git pull 或重新下载），已有配置不覆盖。
 set -eu
 
+SKIP_SKILL="${LAH_SKIP_SKILL:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --skip-skill)
+      SKIP_SKILL=1
+      ;;
+    -h|--help)
+      echo "用法: install.sh [--skip-skill]"
+      echo "  --skip-skill  跳过自动安装 ~/.agents/skills/lah（也可设置环境变量 LAH_SKIP_SKILL=1）"
+      exit 0
+      ;;
+  esac
+done
+
 REPO_GIT="https://github.com/backtomyfuture/lark-a2a-hub.git"
 REPO_TAR="https://codeload.github.com/backtomyfuture/lark-a2a-hub/tar.gz/refs/heads/main"
 HOME_DIR="${HUB_NODE_HOME:-$HOME/.hub-node}"
@@ -44,10 +58,14 @@ mkdir -p "$HOME/.local/bin"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/lah"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/hub-node"
 
-# 自动安装 lah Skill 给终端 Agent 使用
-mkdir -p "$HOME/.agents/skills/lah"
-if [ -f "$APP/skills/lah/SKILL.md" ]; then
-  cp -f "$APP/skills/lah/SKILL.md" "$HOME/.agents/skills/lah/SKILL.md"
+# 自动安装 lah Skill 给终端 Agent 使用（可通过 --skip-skill 或 LAH_SKIP_SKILL=1 跳过）
+if [ "$SKIP_SKILL" != "1" ] && [ "$SKIP_SKILL" != "true" ]; then
+  mkdir -p "$HOME/.agents/skills/lah"
+  if [ -f "$APP/skills/lah/SKILL.md" ]; then
+    cp -f "$APP/skills/lah/SKILL.md" "$HOME/.agents/skills/lah/SKILL.md"
+  fi
+else
+  echo "跳过安装 lah Skill（--skip-skill）"
 fi
 
 cat <<EOF

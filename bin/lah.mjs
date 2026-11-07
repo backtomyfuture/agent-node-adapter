@@ -517,7 +517,7 @@ if (cmd === "setup") {
 } else {
   console.log(`lah ${DAEMON_VERSION}
 用法：
-  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent]  一键配置向导（首次装机跑这个）
+  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--skip-skill]  一键配置向导（首次装机跑这个）
   lah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
