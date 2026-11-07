@@ -46,9 +46,12 @@ flowchart LR
 
 2. **一键向导配置**：
    ```bash
-   lah setup
+   lah setup [--kind host|agent]
    ```
-   提示式向导会自动发现 lark-cli 应用、自动识别本机已安装的 Agent（Claude Code、Codex、agy 等）并生成 `commands.json`，解析 Base 七表 ID、写入 600 权限的 `app.env` 与 `node.json`，注册云文档事件订阅实现秒级唤醒，并运行 `doctor` 自检。最后可直接确认注册开机自启。
+   提示式向导支持选择机器类型（1=电脑宿主，2=独立 Agent 本尊）：
+   - **`kind: host`（电脑宿主，默认）**：自动发现 lark-cli 应用、自动识别本机已安装的 Agent（Claude Code、Codex、agy、Paseo、Orca 等）并生成 `commands.json`，由守护进程拉起子进程干活；
+   - **`kind: agent`（独立 Agent，如 Muse、Grok Bot）**：本身即为 Agent 实体，setup 绝不扫描 PATH、不注册任何外部 CLI，只注册 `agent` 能力（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳保活，任务由本尊自行接单与处理。
+   自动解析 Base 六表 ID、写入 600 权限的 `app.env` 与 `node.json`，注册云文档事件订阅实现秒级唤醒，并运行 `doctor` 自检。最后可直接确认注册开机自启。
 
 3. **验收运行**：
    ```bash
@@ -84,6 +87,14 @@ flowchart LR
   ```
 - **审批安全红线**：
   需要机主授权的动作自动转入 `auth-required`，由主节点在飞书向机主发送卡片，机主点击批准/驳回后自动恢复执行或取消，无需终端手动干预。
+- **独立 Agent 接单与回执（收件箱工作流）**：
+  若节点以 `--kind agent` 运行，Agent 本尊在循环开头接单，处理后原路提交回执：
+  ```bash
+  lah inbox --pop                                                    # 接单：读取并确认待办
+  lah inbox done --task TASK-XXXX --text "执行结论" [--artifact <路径>]  # 完单：关单并原路回传
+  lah inbox ask  --task TASK-XXXX --text "追问问题"                   # 追问：转入 input-required 待答
+  lah inbox fail --task TASK-XXXX --text "失败原因"                   # 失败：置 failed 并原路通知
+  ```
 
 ---
 

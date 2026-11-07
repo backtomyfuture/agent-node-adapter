@@ -141,9 +141,11 @@ export async function doctor(configDir, appDir, opts = {}) {
   }
 
   const role = roleFrom(process.argv, opts, raw);
+  const kind = raw?.kind || "host";
 
   console.log(`lah doctor ${DAEMON_VERSION}`);
   console.log(`role: ${role}`);
+  console.log(`kind: ${kind}`);
   console.log(`config dir: ${configDir}`);
   if (probeProvided && !probe) {
     bad(`--probe 需要 <host:port>（例如 192.168.1.10:22），收到：${opts.probe === "" ? "(空)" : opts.probe}`);
@@ -176,7 +178,7 @@ export async function doctor(configDir, appDir, opts = {}) {
       const names = Object.keys(cmds);
       ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
       for (const [name, entry] of Object.entries(cmds)) {
-        if (!entry.command) { bad(`能力 ${name} 缺 command 模板`); problems++; }
+        if (!entry.command && entry.mode !== "inbox") { bad(`能力 ${name} 缺 command 模板`); problems++; }
       }
     } else if (role === "hub") {
       info("未配置 commands.json（hub 仍可承担审批/呈递，但不会认领干活任务）");

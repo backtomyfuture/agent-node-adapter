@@ -20,7 +20,7 @@ const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "Age
 const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
 
 function parseFlags(argv) {
-  const f = { yes: false, force: false, service: false, role: "node" };
+  const f = { yes: false, force: false, service: false, role: "node", kind: "" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") f.yes = true;
@@ -28,6 +28,8 @@ function parseFlags(argv) {
     else if (a === "--service") f.service = true;
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
+    else if (a === "--kind") f.kind = argv[++i] || "host";
+    else if (a.startsWith("--kind=")) f.kind = a.slice("--kind=".length);
     else if (a === "--owner" || a === "--owner-open-id") f.ownerOpenId = argv[++i];
     else if (a.startsWith("--owner=")) f.ownerOpenId = a.slice("--owner=".length);
     else if (a.startsWith("--owner-open-id=")) f.ownerOpenId = a.slice("--owner-open-id=".length);
@@ -535,7 +537,7 @@ function isUnfinishedExample(raw) {
 function isExampleCommands(obj) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
   if (Object.hasOwn(obj, "lan-exec")) return true;
-  return Object.values(obj).some((e) => typeof e?.command === "string" && (e.command.includes("../src/executors/echo.mjs") || e.command.includes("../src/executors/agent-inbox.mjs")));
+  return Object.values(obj).some((e) => typeof e?.command === "string" && e.command.includes("../src/executors/echo.mjs"));
 }
 
 function echoSeed(appDir) {
@@ -546,14 +548,6 @@ function echoSeed(appDir) {
       mode: "json",
       name: "回声测试",
       side_effect: "read",
-    },
-    "agent-inbox": {
-      command: `node ${JSON.stringify(path.join(appDir, "src", "executors", "agent-inbox.mjs"))}`,
-      desc: "通用 Agent 收件箱：接收任务并记录至本地 inbox 队列",
-      mode: "json",
-      name: "Agent 收件箱",
-      side_effect: "write",
-      approval_class: "auto",
     },
   };
 }
@@ -969,6 +963,18 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(`  ✓ Base 表发现完成（${REQUIRED_TABLES.length} 张标准表齐全）`);
 
     // 4. 身份与参数配置
+    let kind = flags.kind || "";
+    if (!kind) {
+      if (interactive) {
+        const k = await ask("这台机器是：1=电脑（宿主：拉起本机已装的 CLI Agent 干活），2=独立 Agent（本身就是 Agent，如 Muse，接单后交给它自己处理）", "1");
+        kind = (k === "2" || /agent/i.test(k)) ? "agent" : "host";
+      } else {
+        kind = "host";
+      }
+    } else {
+      kind = /agent/i.test(kind) ? "agent" : "host";
+    }
+
     let node, zone, prefix, nodeDesc, ownerOpenId;
     if (role === "hub") {
       node = flags.node || "hub";
@@ -994,7 +1000,7 @@ export async function runSetup(configDir, argv, appDir) {
       prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
       nodeDesc = flags.desc ?? "主枢纽节点（干活＋审批呈递）";
       if (interactive) {
-        console.log(`  · 即将配置：主枢纽 ${node}（机主 ${ownerOpenId.slice(0, 8)}…），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+        console.log(`  · 即将配置：主枢纽 ${node}（${kind === "agent" ? "独立 Agent" : "电脑宿主"}，机主 ${ownerOpenId.slice(0, 8)}…），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
         const go = await ask("开始配置？(Y/n)", "Y");
         if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
       }
@@ -1010,9 +1016,9 @@ export async function runSetup(configDir, argv, appDir) {
         }
       }
       prefix = flags.prefix || node.split("-").filter(Boolean).pop() || node;
-      nodeDesc = flags.desc ?? "";
+      nodeDesc = flags.desc ?? (kind === "agent" ? `${node} 独立 Agent` : "");
       if (interactive) {
-        console.log(`  · 即将配置：节点 ${node}（${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
+        console.log(`  · 即将配置：节点 ${node}（${kind === "agent" ? "独立 Agent" : "电脑宿主"}，${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
         const go = await ask("开始配置？(Y/n)", "Y");
         if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
       }
@@ -1107,6 +1113,7 @@ export async function runSetup(configDir, argv, appDir) {
     const nodeJson = {
       node,
       role,
+      kind,
       ...(role === "hub" ? { ownerOpenId } : {}),
       zone: zone || "work",
       nodeDesc: nodeDesc || "",
@@ -1121,31 +1128,6 @@ export async function runSetup(configDir, argv, appDir) {
     };
     fs.writeFileSync(nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
 
-    const discoveredAgents = discoverLocalAgents();
-    let selectedAgents = [];
-    if (discoveredAgents.length > 0) {
-      console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
-      discoveredAgents.forEach((a, idx) => {
-        console.log(`    ${idx + 1}. [${a.skill}] ${a.name} (${a.path})`);
-      });
-
-      let pick = "all";
-      if (interactive) {
-        pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
-      }
-      const p = String(pick).trim().toLowerCase();
-      if (p === "none" || p === "0") {
-        selectedAgents = [];
-      } else if (p === "all" || p === "" || p === "y" || p === "yes") {
-        selectedAgents = discoveredAgents;
-      } else {
-        const indices = p.split(/[,，\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= discoveredAgents.length);
-        selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
-      }
-    } else {
-      console.log("  · 未扫描到常见本机终端 Agent（已配置 echo-test 与 agent-inbox 基础能力）");
-    }
-
     const cmdPath = path.join(configDir, "commands.json");
     const cmdExisted = fs.existsSync(cmdPath);
     let existingCmds = {};
@@ -1157,9 +1139,48 @@ export async function runSetup(configDir, argv, appDir) {
       } catch { /* 留着，下面不覆盖 */ }
     }
 
-    // 如果原来是示例命令或不存在，以 echoSeed 为基础，否则保留已有命令
-    const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
-    const finalCmds = buildAgentCommands(selectedAgents, baseCmds);
+    let finalCmds;
+    if (kind === "agent") {
+      console.log("  · 节点类型为独立 Agent (kind=agent)：跳过本机 CLI Agent 扫描，配置专属能力 agent (mode: inbox)");
+      finalCmds = (!cmdExisted || isExample) ? {
+        agent: {
+          desc: "以本 Agent 为执行主体的专属任务接入通道",
+          mode: "inbox",
+          name: node,
+          side_effect: "write",
+          approval_class: "auto",
+          inbox_timeout_sec: 86400,
+        },
+      } : existingCmds;
+    } else {
+      const discoveredAgents = discoverLocalAgents();
+      let selectedAgents = [];
+      if (discoveredAgents.length > 0) {
+        console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
+        discoveredAgents.forEach((a, idx) => {
+          console.log(`    ${idx + 1}. [${a.skill}] ${a.name} (${a.path})`);
+        });
+
+        let pick = "all";
+        if (interactive) {
+          pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
+        }
+        const p = String(pick).trim().toLowerCase();
+        if (p === "none" || p === "0") {
+          selectedAgents = [];
+        } else if (p === "all" || p === "" || p === "y" || p === "yes") {
+          selectedAgents = discoveredAgents;
+        } else {
+          const indices = p.split(/[,，\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= discoveredAgents.length);
+          selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
+        }
+      } else {
+        console.log("  · 未扫描到常见本机终端 Agent（已配置 echo-test 基础能力）");
+      }
+
+      const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
+      finalCmds = buildAgentCommands(selectedAgents, baseCmds);
+    }
 
     fs.writeFileSync(cmdPath, JSON.stringify(finalCmds, null, 1) + "\n");
     const names = Object.keys(finalCmds);

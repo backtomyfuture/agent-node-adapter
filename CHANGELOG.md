@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+- 节点类型区分（host 电脑宿主 vs agent 独立 Agent）与异步收件箱 inbox 模式（中台标准 v3.4）：
+  - **`node.json` 新增 `kind: "host" | "agent"`（缺省 host，向下兼容）**：
+    - `lah setup` 新增 `--kind host|agent` 参数，交互模式下提示选择电脑宿主（1=host）或独立 Agent 本尊（2=agent）；
+    - **`kind: agent` 纯净独立能力注册**：setup 阶段**绝不调用 `discoverLocalAgents()`**，不扫描 PATH、不注册任何外部 CLI；唯一注册能力为 `agent`（`name` 为节点名，`mode: "inbox"`，`inbox_timeout_sec: 86400`）；
+    - `kind: host` 保持现行电脑宿主行为（自动探测本机 CLI Agent，基础能力仅保留 `echo-test`，移除 `agent-inbox` 占位）；
+    - `lah doctor` 与 `AgentCards` 登记按 kind 清晰展示节点类型；
+    - `lah task create` 省略 `--cap` 派发给 agent 类型节点时，自动直达其 `agent` 能力；
+  - **新增 `mode: "inbox"` 异步接单执行模式**：
+    - 内核认领 inbox 能力任务后，将任务数据（Task_ID、Title、From_Node、指令正文、params、历史多轮问答）写入配置目录 `agent_inbox.jsonl`（600 权限），**任务保持 working 状态，不起子进程，不提前关单**；
+    - 内核每轮循环对未超时的 inbox working 任务持续刷新 `Heartbeat_At`，避免 20 分钟被中台回收；支持配置 `inbox_timeout_sec`（缺省 86400 秒），超时自动置 `failed` + notice「本尊超时未处理」；
+    - 中断态续跑支持：发起方调用 `lah task reply` 答复追问后，内核自动将原任务重新以 `status: "pending"` 注入 inbox，追加最新答复供 Agent 本尊继续执行；
+  - **CLI 新增 `lah inbox` 全套操作命令**：
+    - `lah inbox [--pop] [--json]`：读取并确认当前未处理的任务；
+    - `lah inbox done --task <Task_ID> --text <结果> [--artifact <路径或URL>]`：关闭 Runs、写 result 消息原路回传发起方、关联产物，将任务标为 completed；
+    - `lah inbox ask --task <Task_ID> --text <问题>`：发起追问，写 question 消息原路回传，任务转入 input-required；
+    - `lah inbox fail --task <Task_ID> --text <原因>`：关闭 Runs、写 notice 消息原路回传，任务标为 failed；
+    - 严格遵循红线：只能操作归属本节点且处于 working 状态的任务；node 角色不写 auth_decision 与 canceled；
+  - **双向对称闭环**：
+    - 独立 Agent 节点通过 `lah present --pop` 收取自己派出的任务成果，通过 `lah inbox --pop` 提取派给自己的新活，实现无缝多 Agent 双向协同。
+
+
 - 容器与无 TTY 环境加固、存量任务呈递基线与通用 Agent 收件箱（中台标准 v3.3）：
   - **无 TTY / 容器与云端环境安装及服务加固**：
     - `src/service.mjs`：

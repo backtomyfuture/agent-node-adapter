@@ -11,6 +11,7 @@ import { FeishuBus, f1 } from "./bus/feishu.mjs";
 import { createWaker } from "./transport/index.mjs";
 import { execViaCarrier, pingCarrier, runDetachedCommand } from "./carrier.mjs";
 import { PresentService } from "./hub/present.mjs";
+import { enqueueOrUpdateInbox, readInbox, markInboxStatus } from "./inbox.mjs";
 
 export const DAEMON_VERSION = "node-0.5.0";
 const HOP_LIMIT = 8;
@@ -140,6 +141,8 @@ export function loadConfig(configDir) {
   if (!cfg.baseToken || !cfg.tables) throw new Error("node.json missing baseToken/tables");
   return {
     node: cfg.node,
+    role: cfg.role,
+    kind: cfg.kind || "host",
     zone: cfg.zone ?? "",
     nodeDesc: cfg.nodeDesc ?? "",
     pollSec: cfg.pollSec ?? 45,
@@ -149,7 +152,6 @@ export function loadConfig(configDir) {
     carrierSocket: cfg.carrierSocket ? cfg.carrierSocket.replace(/^~/, os.homedir()) : path.join(configDir, "carrier.sock"),
     capPrefix: cfg.capPrefix ?? cfg.node,
     // 缺省 undefined。hub 角色由传输层强制走长连接；不在这里把缺省改写成 node，避免和角色改造抢字段语义。
-    role: cfg.role,
     bus: new FeishuBus({ appId, appSecret, baseToken: cfg.baseToken, tables: cfg.tables }),
     configDir,
   };
@@ -658,12 +660,14 @@ export class Kernel {
 
   desiredCard(skill, entry, carrierUp) {
     const receiveMode = this.cfg.events || this.cfg.doorbellFile ? "event" : "poll";
+    const isInbox = entry?.mode === "inbox";
+    const desc = isInbox ? (entry?.desc || `${this.cfg.node} 独立 Agent 本尊`) : (entry?.desc ?? "");
     return {
       Cap_ID: this.capIdFor(skill, entry),
       Node: this.cfg.node,
       Zone: this.cfg.zone ?? "",
       Skill_Name: entry?.name ?? skill,
-      Description: entry?.desc ?? "",
+      Description: desc,
       Skill_ID: skill,
       Side_Effect: entry?.side_effect ?? "write",
       // carrier 离线只改名片，不把任务悄悄改成直跑。
@@ -674,6 +678,10 @@ export class Kernel {
       Cap_Push: "No",
       Cap_Streaming: "No",
       Cap_State_History: "Yes",
+      Metadata: JSON.stringify({
+        kind: this.cfg.kind || "host",
+        mode: entry?.mode || "agent",
+      }),
     };
   }
 
@@ -759,6 +767,36 @@ export class Kernel {
       if (f1(t, "Status") === "working" && f1(t, "Claimed_By") === this.cfg.node) {
         const current = await this.taskForWrite(t, ["working"], true);
         if (!current) continue;
+        const taskId = f1(current, "Task_ID");
+        const skill = f1(current, "Skill_ID");
+        const entry = this.commands[skill] ?? {};
+
+        // inbox 型能力：保活与超时处理
+        if (entry.mode === "inbox") {
+          const inboxList = readInbox(this.cfg.configDir);
+          const item = inboxList.find((x) => x.task_id === taskId);
+          const isPendingOrAcked = item && (item.status === "pending" || item.status === "acked" || item.status === "waiting-answer");
+          if (isPendingOrAcked) {
+            const timeoutSec = Number(item.inbox_timeout_sec) || Number(entry.inbox_timeout_sec) || 86400;
+            const claimedTime = item.claimed_at ? (typeof item.claimed_at === "number" ? item.claimed_at : Date.parse(item.claimed_at)) : Date.now();
+            const elapsedSec = (Date.now() - claimedTime) / 1000;
+            if (elapsedSec > timeoutSec) {
+              const rid = await this.writeRun(current, "failed", nowStr(), `inbox task timed out over ${timeoutSec}s`);
+              await this.writeMessage(current, "notice", "本尊超时未处理");
+              await this.updateTaskState(current, {
+                Status: "failed", Latest_Run: rid, Heartbeat_At: "", Claimed_By: "",
+              }, ["working"], true);
+              markInboxStatus(this.cfg.configDir, taskId, "failed", { reason: "timeout" });
+              log(`inbox task timed out and marked failed: ${taskId}`);
+            } else {
+              // 未超时：刷新 Heartbeat_At 保活，避免 20 分钟租约回收
+              await this.bus.updateRecord(this.T.tasks, current.record_id, { Heartbeat_At: nowStr() });
+              log(`inbox heartbeat refreshed: ${taskId}`);
+            }
+            continue;
+          }
+        }
+
         const hb = f1(current, "Heartbeat_At");
         let stale = true;
         if (hb) {
@@ -1213,6 +1251,29 @@ export class Kernel {
       openRunId = await this.openRun(task, started);
       const params = await this.getParams(task);
       if (extraAnswers) params._answers = extraAnswers;
+
+      const entry = this.commands[skill] ?? {};
+      if (entry.mode === "inbox") {
+        await stopHeartbeat();
+        const instruction = await this.instructionText(task);
+        const dialogue = await this.collectDialogue(task, extraAnswers);
+        const fromNode = await this.initiatorOf(task);
+        const title = String(f1(task, "Title") ?? "");
+        enqueueOrUpdateInbox(this.cfg.configDir, {
+          task_id: taskId,
+          from_node: fromNode,
+          title,
+          text: instruction,
+          params,
+          turns: dialogue.turns,
+          inbox_timeout_sec: Number(entry.inbox_timeout_sec) || 86400,
+          claimed_at: Date.now(),
+        });
+        log(`inbox queued ${taskId} for agent本尊 (mode: inbox)`);
+        // 保持 working 状态，不起子进程，不结案，由 Agent 本尊通过 lah inbox 接收并回执
+        return;
+      }
+
       const res = await this.runCommand(skill, task, params, extraAnswers);
       // 回执已经拿到。先落 outbox，再停心跳、再写表；写表失败不许落到下面的重试。
       const box = this.beginOutbox(task, { outcome: "succeeded", res, started, runId: openRunId });
@@ -1385,6 +1446,25 @@ export class Kernel {
       log(`resuming ${f1(task, "Task_ID")} with ${answers.length} answer(s)`);
       // 暂停期间能力被撤、跳数被改、本地下限收紧或 carrier 离线，都要在续跑前再拦一次。
       if (!(await this.preflight(task))) return;
+
+      const skill = f1(task, "Skill_ID");
+      const entry = this.commands[skill] ?? {};
+      if (entry.mode === "inbox") {
+        if (!(await this.updateTaskState(task, {
+          Status: "working", Heartbeat_At: nowStr(), Status_Msg: "",
+        }, ["input-required"], true))) return;
+        const dialogue = await this.collectDialogue(task, answers);
+        enqueueOrUpdateInbox(this.cfg.configDir, {
+          task_id: f1(task, "Task_ID"),
+          from_node: await this.initiatorOf(task),
+          turns: dialogue.turns,
+          answers,
+          status: "pending",
+        });
+        log(`inbox task resumed and put back to pending: ${f1(task, "Task_ID")}`);
+        return;
+      }
+
       await this.execute(task, answers);
     }
   }

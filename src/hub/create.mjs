@@ -158,8 +158,13 @@ export async function createTask({
         const priority = (c) => {
           const sid = String(f1(c, "Skill_ID") ?? "").toLowerCase();
           const online = isOnline(c) ? 10 : 0;
+          let isAgentNode = false;
+          try {
+            const meta = JSON.parse(String(f1(c, "Metadata") ?? "{}"));
+            if (meta?.kind === "agent" || meta?.mode === "inbox") isAgentNode = true;
+          } catch {}
+          if (sid === "agent" || isAgentNode) return 200 + online;
           if (sid === "ops-agent") return 100 + online;
-          if (sid === "agent") return 90 + online;
           if (sid.endsWith("-agent")) return 80 + online;
           if (sid.includes("agent")) return 70 + online;
           if (sid !== "echo-test") return 50 + online;

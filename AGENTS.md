@@ -11,7 +11,8 @@ lark-a2a-hub：以飞书多维表格为共享总线、按 A2A 数据模型调度
 - `src/bus/feishu.mjs`：Bitable REST 客户端（全局 `fetch`）；对 1254291 写冲突与 429/5xx 退避重试；`f1()` 把单元素数组字段取成标量。
 - `src/bus/feishu-events.mjs`：长连接订阅 `drive.file.bitable_record_changed_v1`，只当门铃叫醒内核，不解析事件内容。
 - `src/carrier.mjs`：carrier 语境（unix socket 上的 NDJSON，`ping` / `exec` 两种帧）。
-- `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs`：装机向导、只读自检、LaunchAgent/systemd 用户级自启（均支持 `--role node|hub`）；自动安装 `lah` Agent Skill。
+- `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs`：装机向导、只读自检、LaunchAgent/systemd 用户级自启（均支持 `--role node|hub` 与 `--kind host|agent`）；自动安装 `lah` Agent Skill。
+- `src/inbox.mjs`：独立 Agent 收件箱操作库，承载 `agent_inbox.jsonl` 的读写、心跳核验与 `lah inbox (done|ask|fail)` 总线回执。
 - `src/executors/echo.mjs`：json 模式示例执行器（stdin 读信封，stdout 回显）。
 - `src/hub/`：hub 角色——单进程超集（每轮扫表先由 `Kernel` 认领执行任务并登记能力，再由 `approval` 审批发卡、回调校验机主写 `auth_decision`、写 `canceled`、`present` 结果呈递到本地队列、`stale` 陈旧任务告警）。建单入口为 `lah task create`。Rules 自动路由仍为计划。node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。飞书端仅发审批交互卡，不发大段纯文本刷屏。
 - `src/transport/`：唤醒工厂（`createWaker`），支持 `ws`（长连接门铃 + 卡片回调）与 `poll`（默认 45 秒）两种入站唤醒，外加 15 分钟对账定时兜底；webhook 专指飞书自动化出站 POST，本项目不主动推送。hub 角色强制 ws。
@@ -34,6 +35,10 @@ node bin/lah.mjs task create --config <dir> --to <node> --cap <cap_id> [--text <
 node bin/lah.mjs task reply --config <dir> --task <Task_ID> --text <答复内容>
 node bin/lah.mjs task show <Task_ID> [--config <dir>]
 node bin/lah.mjs present [--pop] [--config <dir>]
+node bin/lah.mjs inbox [--pop] [--json] [--config <dir>]
+node bin/lah.mjs inbox done --task <Task_ID> --text <结果> [--artifact <路径或URL>]
+node bin/lah.mjs inbox ask  --task <Task_ID> --text <问题>
+node bin/lah.mjs inbox fail --task <Task_ID> --text <原因>
 APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… node schema/generate_schema.mjs   # 改表后同步 schema 文档
 ```
 
@@ -42,7 +47,7 @@ APP_ID=… APP_SECRET=… HUB_BASE_TOKEN=… node schema/generate_schema.mjs   #
 ## 代码约定
 
 - Node >= 20，ESM `.mjs`，HTTP 只用全局 `fetch`。新增运行时依赖须有充分理由。
-- 内核是薄壳：新能力 = `commands.json` 一条模板（`command`、`mode: agent|json`（默认 agent）、`context: direct|carrier`、`timeout_sec`（默认 600）、`cwd`（默认配置目录）、`side_effect`、`cap_id`、`name`、`desc`），启动时自动登记 AgentCards。不往内核里塞执行器或某个 Agent 的专用代码。
+- 内核是薄壳：新能力 = `commands.json` 一条模板（`command`、`mode: agent|json|inbox`（默认 agent）、`context: direct|carrier`、`timeout_sec`（默认 600）、`cwd`（默认配置目录）、`side_effect`、`cap_id`、`name`、`desc`），启动时自动登记 AgentCards。不往内核里塞执行器或某个 Agent 的专用代码。host 节点能力来自 commands.json 的本机命令模板；agent 节点能力只有 `agent`（inbox 模式），执行主体是节点本尊，守护进程不替它拉起任何外部 Agent。
 - 读写总线一律经 `FeishuBus`，读字段用 `f1()`；写操作逐条 `await`，不对同表并发写（不用 `Promise.all` 批量写）。
 - 常驻韧性：启动期任何失败都只记日志、进主循环重试，进程不退出；能力登记成功前不处理任务。
 - 唤醒标志在 `run()` 扫表前清零，不在 `waitWake()` 里清（ECHO-004 竞态）；事件只是门铃，15 分钟对账扫表是兜底。

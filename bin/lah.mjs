@@ -390,6 +390,108 @@ if (cmd === "setup") {
     console.error("用法：lah task create | reply | show");
     process.exitCode = 1;
   }
+} else if (cmd === "inbox") {
+  const sub = rest[0];
+  const configDir = configDirFrom(rest);
+  if (sub === "done") {
+    const argv = rest.slice(1);
+    let taskId = "";
+    let text = "";
+    let artifact = "";
+    let cfgDir = "";
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (flag === "--task") taskId = argv[++i] ?? "";
+      else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--artifact") artifact = argv[++i] ?? "";
+      else if (flag === "--config") cfgDir = argv[++i] ?? "";
+      else if (!flag.startsWith("--") && !taskId) taskId = flag;
+    }
+    if (!taskId) {
+      console.error("用法：lah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径>]");
+      process.exitCode = 1;
+    } else {
+      try {
+        const { handleInboxDone } = await import("../src/inbox.mjs");
+        const cfg = loadConfig(cfgDir || configDir);
+        await handleInboxDone({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text, artifact });
+        console.log(`✓ 任务 ${taskId} 已完成并上报总线`);
+      } catch (e) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    }
+  } else if (sub === "ask") {
+    const argv = rest.slice(1);
+    let taskId = "";
+    let text = "";
+    let cfgDir = "";
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (flag === "--task") taskId = argv[++i] ?? "";
+      else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--config") cfgDir = argv[++i] ?? "";
+      else if (!flag.startsWith("--") && !taskId) taskId = flag;
+    }
+    if (!taskId || !text) {
+      console.error("用法：lah inbox ask --task <Task_ID> --text <需要用户/发起方补充的信息>");
+      process.exitCode = 1;
+    } else {
+      try {
+        const { handleInboxAsk } = await import("../src/inbox.mjs");
+        const cfg = loadConfig(cfgDir || configDir);
+        await handleInboxAsk({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text });
+        console.log(`✓ 任务 ${taskId} 已转入 input-required 并向发起方提问`);
+      } catch (e) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    }
+  } else if (sub === "fail") {
+    const argv = rest.slice(1);
+    let taskId = "";
+    let text = "";
+    let cfgDir = "";
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (flag === "--task") taskId = argv[++i] ?? "";
+      else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--config") cfgDir = argv[++i] ?? "";
+      else if (!flag.startsWith("--") && !taskId) taskId = flag;
+    }
+    if (!taskId) {
+      console.error("用法：lah inbox fail --task <Task_ID> --text <失败原因>");
+      process.exitCode = 1;
+    } else {
+      try {
+        const { handleInboxFail } = await import("../src/inbox.mjs");
+        const cfg = loadConfig(cfgDir || configDir);
+        await handleInboxFail({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text: text || "执行失败" });
+        console.log(`✓ 任务 ${taskId} 已置 failed 并上报原因`);
+      } catch (e) {
+        console.error(e?.message ?? e);
+        process.exitCode = 1;
+      }
+    }
+  } else {
+    // lah inbox [--pop] [--json]
+    const isPop = rest.includes("--pop");
+    const isJson = rest.includes("--json");
+    try {
+      const { popPendingInbox, readInbox } = await import("../src/inbox.mjs");
+      const items = isPop ? popPendingInbox(configDir, { pop: true }) : readInbox(configDir);
+      if (isJson) {
+        console.log(JSON.stringify(items, null, 2));
+      } else {
+        for (const item of items) {
+          console.log(JSON.stringify(item));
+        }
+      }
+    } catch (e) {
+      console.error("读取 agent_inbox.jsonl 失败：" + (e?.message ?? e));
+      process.exitCode = 1;
+    }
+  }
 } else if (cmd === "present") {
   const isPop = rest.includes("--pop");
   const configDir = configDirFrom(rest);
@@ -415,11 +517,15 @@ if (cmd === "setup") {
 } else {
   console.log(`lah ${DAEMON_VERSION}
 用法：
-  lah setup   [--config <dir>] [--role node|hub]  一键配置向导（首次装机跑这个）
+  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent]  一键配置向导（首次装机跑这个）
   lah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
   lah host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）
+  lah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）
+  lah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径>]
+  lah inbox ask  --task <Task_ID> --text <补充提问>
+  lah inbox fail --task <Task_ID> --text <失败原因>
   lah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>]
   lah task reply  --task <Task_ID> --text <答复内容>
   lah task show   <Task_ID>

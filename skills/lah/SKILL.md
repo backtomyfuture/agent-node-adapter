@@ -80,7 +80,49 @@ lah task show <Task_ID>
 - 最新一条消息的正文内容；
 - 产物列表（`Artifact_ID`、产物名称与描述）。
 
-### 5. 检查节点与总线状态 (`lah doctor`)
+### 5. 独立 Agent 收件箱接单与回执 (`lah inbox`)
+
+当本节点作为独立 Agent（`kind=agent`，如 Muse、Grok Bot 等）运行时，中台将任务投递至本尊收件箱。Agent 本尊通过以下命令与中台闭环交互：
+
+#### 5.1 查看与提取新任务 (`lah inbox`)
+```bash
+lah inbox --pop [--json]
+```
+- `--pop`：提取待办任务并将状态标记为 `acked`（已认领接单）；若无新任务则干净退出；
+- 输出字段：`task_id`、`from_node`（任务发起方）、`title`、`text`（指令说明）、`params`（结构化参数）、`turns`（历史多轮问答）；
+- Agent 本尊拿到指令后在自身环境内执行。
+
+#### 5.2 任务完成并原路交付 (`lah inbox done`)
+执行完毕后，提交最终结果并关单，中台将自动原路回传给发起方：
+```bash
+lah inbox done --task <Task_ID> --text "<执行总结与交付内容>" [--artifact <产物路径或URL>]
+```
+
+#### 5.3 任务追问与补充输入 (`lah inbox ask`)
+若执行中需要发起方澄清或提供更多参数，发起追问并将任务置入 `input-required`：
+```bash
+lah inbox ask --task <Task_ID> --text "<需要发起方回答的问题>"
+```
+发起方通过 `lah task reply` 答复后，中台会自动将该任务连同最新答复重新注入本尊的 `lah inbox`（状态恢复为 `pending`），本尊直接续跑。
+
+#### 5.4 标记任务失败 (`lah inbox fail`)
+若任务无法完成或环境异常，终止任务并通知发起方：
+```bash
+lah inbox fail --task <Task_ID> --text "<失败原因说明>"
+```
+
+---
+
+## 独立 Agent 节点的推荐执行工作流
+
+独立 Agent 建议在每轮对话、定时轮询或平台启动 Hook 中执行「双向收割」：
+1. **收结果**：运行 `lah present --pop`，看自己之前派给其他节点（如爬虫节点、运维节点）的任务是否有产出；
+2. **接新活**：运行 `lah inbox --pop`，看中台是否有其他节点指派给自己的新任务；
+3. **处理并交付**：执行完新任务后，运行 `lah inbox done --task <Task_ID> --text "..."`。
+
+---
+
+### 6. 检查节点与总线状态 (`lah doctor`)
 查看当前环境、配置凭据、长连接状态以及本节点和全网在册的 Agent 能力：
 ```bash
 lah doctor
