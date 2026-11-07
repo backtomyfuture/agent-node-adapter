@@ -27,18 +27,20 @@ description: 操作与调度 lark-a2a-hub (lah) 多 Agent 协作中台：查询�
 ### 1. 派发跨节点任务 (`lah task create`)
 向指定节点的指定能力派发异步任务：
 ```bash
-lah task create --to <Target_Node> --cap <Skill_ID> --text "<指令说明>" [--params '<JSON字符串或@文件>']
+lah task create --to <Target_Node> [--cap/--skill <Skill_ID>] --text "<指令说明>" [--params '<JSON字符串或@文件>']
 ```
 - 默认以本机节点名作为 `From_Node` 与 `Source`；
+- `--cap`（或 `--skill`）可省略：系统会自动从目标节点的 `AgentCards` 中挑选首选通用能力（如 `ops-agent`、`agent` 等）；
+- 若直接指定已知的 `CAP-...`，甚至可省略 `--to`（自动反查归属节点）；
 - 命令成功后输出生成的 `Task_ID`（如 `TASK-20261107-a1b2c3`）。
 
 示例：
 ```bash
-# 让工作机 mba 执行 echo 测试
-lah task create --to mba --cap echo-test --text "ping test" --params '{"hello":"world"}'
+# 让工作机 mba 执行任务（自动挑选 mba 的首选 Agent）
+lah task create --to mba --text "检查生产数据库磁盘剩余空间与连接数"
 
-# 让工作机 mba 调用本地 Agent 执行运维巡检
-lah task create --to mba --cap ops-agent --text "检查生产数据库磁盘剩余空间与连接数"
+# 显式指定能力（如 echo 测试）
+lah task create --to mba --cap echo-test --text "ping test" --params '{"hello":"world"}'
 ```
 
 ### 2. 消费原路返回的结果队列 (`lah present --pop`)

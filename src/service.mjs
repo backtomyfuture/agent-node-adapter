@@ -81,19 +81,26 @@ export function renderPlist({ label, appBin, configDir, role, logPath }) {
 `;
 }
 
-export function renderSystemdUnit({ role, node, appBin, configDir }) {
+export function renderSystemdUnit({ role, node, appBin, configDir, isSystem = false, user = "", home = "" }) {
+  const serviceLines = [
+    `ExecStart=${systemdArg(process.execPath)} ${systemdArg(appBin)} daemon --config ${systemdArg(configDir)} --role ${systemdArg(role)}`,
+    `WorkingDirectory=${systemdArg(configDir)}`,
+    `Restart=on-failure`,
+    `RestartSec=5`,
+  ];
+  if (isSystem) {
+    if (user) serviceLines.unshift(`User=${user}`);
+    if (home) serviceLines.unshift(`Environment="HOME=${home}"`);
+  }
   return `[Unit]
 Description=hub-node daemon (${role}: ${node})
 After=network-online.target
 
 [Service]
-ExecStart=${systemdArg(process.execPath)} ${systemdArg(appBin)} daemon --config ${systemdArg(configDir)} --role ${systemdArg(role)}
-WorkingDirectory=${systemdArg(configDir)}
-Restart=on-failure
-RestartSec=5
+${serviceLines.join("\n")}
 
 [Install]
-WantedBy=default.target
+WantedBy=${isSystem ? "multi-user.target" : "default.target"}
 `;
 }
 
@@ -136,6 +143,17 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     const legacyUnit = `hub-node-${node}.service`;
     const unitPath = path.join(os.homedir(), ".config", "systemd", "user", unit);
     const legacyUnitPath = path.join(os.homedir(), ".config", "systemd", "user", legacyUnit);
+    const sysUnitPath = `/etc/systemd/system/${unit}`;
+    const legacySysUnitPath = `/etc/systemd/system/${legacyUnit}`;
+    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    let hasSudo = false;
+    if (!isRoot) {
+      try {
+        execFileSync("sudo", ["-n", "true"], { stdio: "ignore" });
+        hasSudo = true;
+      } catch {}
+    }
+
     if (remove) {
       run("systemctl", ["--user", "disable", "--now", unit], { ignore: true });
       if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath);
@@ -144,19 +162,100 @@ export async function service(configDir, { remove = false, role: explicitRole } 
         fs.unlinkSync(legacyUnitPath);
       }
       run("systemctl", ["--user", "daemon-reload"], { ignore: true });
+
+      // 系统级卸载尝试
+      if (isRoot) {
+        run("systemctl", ["disable", "--now", unit], { ignore: true });
+        if (fs.existsSync(sysUnitPath)) fs.unlinkSync(sysUnitPath);
+        if (fs.existsSync(legacySysUnitPath)) fs.unlinkSync(legacySysUnitPath);
+        run("systemctl", ["daemon-reload"], { ignore: true });
+      } else if (hasSudo) {
+        try {
+          execFileSync("sudo", ["systemctl", "disable", "--now", unit], { stdio: "ignore" });
+          execFileSync("sudo", ["rm", "-f", sysUnitPath, legacySysUnitPath], { stdio: "ignore" });
+          execFileSync("sudo", ["systemctl", "daemon-reload"], { stdio: "ignore" });
+        } catch {}
+      }
+
       console.log(`已卸载自启：${unit}`);
       return 0;
     }
-    const text = renderSystemdUnit({ role, node, appBin, configDir });
-    fs.mkdirSync(path.dirname(unitPath), { recursive: true });
-    fs.writeFileSync(unitPath, text);
-    run("systemctl", ["--user", "daemon-reload"]);
-    run("systemctl", ["--user", "enable", "--now", unit]);
-    console.log(`自启已安装并启动：${unit}（role: ${role}）`);
-    console.log(`  单元：${unitPath}`);
-    console.log(`  日志：journalctl --user -u ${unit}`);
-    console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
-    return 0;
+
+    // 检查 systemctl --user 是否真正可用
+    let hasUserSession = false;
+    try {
+      execFileSync("systemctl", ["--user", "daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      hasUserSession = true;
+    } catch {
+      hasUserSession = false;
+    }
+
+    if (hasUserSession) {
+      try {
+        const text = renderSystemdUnit({ role, node, appBin, configDir });
+        fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+        fs.writeFileSync(unitPath, text);
+        run("systemctl", ["--user", "daemon-reload"]);
+        run("systemctl", ["--user", "enable", "--now", unit]);
+        console.log(`自启已安装并启动：${unit}（role: ${role}）`);
+        console.log(`  单元：${unitPath}`);
+        console.log(`  日志：journalctl --user -u ${unit}`);
+        console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
+        return 0;
+      } catch (e) {
+        hasUserSession = false;
+      }
+    }
+
+    // 回退路径 1：若具有 root 或免密 sudo 权限，写入系统级 systemd
+    const curUser = os.userInfo().username;
+    const curHome = os.homedir();
+    if (isRoot || hasSudo) {
+      try {
+        const text = renderSystemdUnit({ role, node, appBin, configDir, isSystem: true, user: curUser, home: curHome });
+        if (isRoot) {
+          fs.writeFileSync(sysUnitPath, text);
+          run("systemctl", ["daemon-reload"]);
+          run("systemctl", ["enable", "--now", unit]);
+        } else {
+          const tmpUnit = path.join(os.tmpdir(), unit);
+          fs.writeFileSync(tmpUnit, text);
+          execFileSync("sudo", ["cp", tmpUnit, sysUnitPath]);
+          fs.unlinkSync(tmpUnit);
+          execFileSync("sudo", ["systemctl", "daemon-reload"]);
+          execFileSync("sudo", ["systemctl", "enable", "--now", unit]);
+        }
+        console.log(`自启已作为系统服务安装并启动：${unit}（role: ${role}）`);
+        console.log(`  单元：${sysUnitPath}`);
+        console.log(`  日志：journalctl -u ${unit}`);
+        console.log(`  卸载：sudo systemctl disable --now ${unit} && sudo rm -f ${sysUnitPath}`);
+        return 0;
+      } catch {}
+    }
+
+    // 回退路径 2：无 systemd user session 且无系统级权限时，以后台进程方式拉起守护，不抛错阻断 setup
+    try {
+      const { spawn } = await import("node:child_process");
+      fs.mkdirSync(configDir, { recursive: true });
+      const outFd = fs.openSync(logPath, "a");
+      const child = spawn(process.execPath, [appBin, "daemon", "--config", configDir, "--role", role], {
+        detached: true,
+        stdio: ["ignore", outFd, outFd],
+        cwd: configDir,
+      });
+      child.unref();
+      console.log(`· 当前环境未提供 systemd user session，已后台拉起守护进程（PID: ${child.pid}）`);
+      console.log(`  日志：${logPath}`);
+      console.log(`  提示：若需开机自启，请由管理员以 root 权限写入 /etc/systemd/system/：`);
+      console.log(`        sudo tee ${sysUnitPath} << 'EOF'`);
+      console.log(renderSystemdUnit({ role, node, appBin, configDir, isSystem: true, user: curUser, home: curHome }));
+      console.log(`EOF`);
+      console.log(`        sudo systemctl daemon-reload && sudo systemctl enable --now ${unit}`);
+      return 0;
+    } catch (e) {
+      console.error(`  ✗ 后台拉起守护进程失败：${e.message}`);
+      return 1;
+    }
   }
 
   console.log(`暂不支持在 ${process.platform} 上自动注册自启；请用任务计划程序手动安排：`);

@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+- 容器与无 TTY 环境加固、存量任务呈递基线与通用 Agent 收件箱（中台标准 v3.3）：
+  - **无 TTY / 容器与云端环境安装及服务加固**：
+    - `src/service.mjs`：修复 Linux 无 `systemd --user` 会话（如 Docker 容器、Agent VM 报 `No medium found` / 无 D-Bus 会话）时导致 `lah service` 报错崩溃退出；支持探测 user 会话，不可用时自动尝试写入系统级 `/etc/systemd/system/` 服务（root 或免密 sudo），若均无权限则以后台进程脱机拉起守护并输出 systemd 配置说明，返回 0 不阻断 setup；
+    - `src/doctor.mjs` 与 `src/setup.mjs`：修复应用缺少 `app.info` 权限时 `checkAppEventSubscribed` 查不了静态事件订阅状态却误报「✗ 未订阅」增加 problems；细化为三态（`subscribed` / `unsubscribed` / `unknown`），`unknown` 只提示跳过静态核对不报 `✗` 不增计数，以实际长连接状态为准；
+    - `src/setup.mjs`：
+      - 扩充 `readLarkConfig`、`loadMasterKey` 与 `decryptLarkCliSecret` 的目录候选列表（全面纳入 `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`~/.config/lark-cli`、`~/.local/share/lark-cli`、`~/.lark-cli`、macOS Library 等）；
+      - 支持 Linux 下通过 `secret-tool` 读取 `master.key`；
+      - 凭据解析优先读取环境变量（`HUB_APP_SECRET`、`APP_SECRET`、`FEISHU_APP_SECRET`、`LARK_APP_SECRET` 及对应 APP_ID）或已有 `app.env`，在容器或无交互脚本中免除 `lark-cli` 交互；
+      - `findLarkCliBin()` 补全全路径探测与自动调用。
+  - **存量 Base 首次启动建立结果呈递水位线（Baseline）**：
+    - `src/setup.mjs` 与 `src/hub/present.mjs`：存量 Base 在新节点或 Hub 首次启动时建立装机水位线（baseline），将已有终态任务（`completed` / `failed` / `rejected` / `canceled`）或已标记 `Presented="Yes"` 的存量任务 `presentKey` 初始化写入 `present_state.json`，彻底避免首启将历史已完成任务全量倾倒入 `present_queue.jsonl` 造成刷屏。
+  - **区分独立 Agent 节点与编排宿主，智能能力解析**：
+    - `src/setup.mjs`：`KNOWN_AGENTS` 新增 `paseo`（Paseo Agent）与 `orca`（Orca Agent）CLI 自动探测与 Agent 命令模板生成，支持本地多 Agent 编排；
+    - `src/executors/agent-inbox.mjs`：新增内置通用收件箱执行器，兼具 JSON 与 Agent 两种模式，可将任务结构化记录追加至本地 `agent_inbox.jsonl` 供独立 Agent 或宿主排队消费；
+    - `src/hub/create.mjs` 与 `bin/lah.mjs`：
+      - `parseCreateArgv` 支持 `--skill` 作为 `--cap` 的别名；
+      - `createTask` 允许传 `CAP-...` 自动反查解析为 `Skill_ID`，未指定 `--to` 时若传了 `CAP-...` 自动反查对应节点；
+      - 允许省略 `--cap`：根据 `--to <node>` 自动从 `AgentCards` 挑选该节点的首选技能（优先 `ops-agent`、`agent`、非 `echo-test` 技能）。
+
+
 - 按发起方原路返回结果、飞书仅发审批卡、内置并自动安装 lah Skill（中台标准 v3.2）：
   - **发起方身份与回执原路指向**：
     - 任何节点与 Agent 均可作为任务入口，`lah task create` 默认以本机为首条 `instruction` 的 `From_Node` 及 `Tasks.Source`（亦可通过 `--from` / `--source` 显式指定）；

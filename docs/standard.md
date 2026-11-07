@@ -189,9 +189,14 @@
   - 飞书端只由 `role=hub` 发送 `auth-required` 交互式审批卡（以及可选的 `stale` 告警），不再往飞书发送大段纯文本结果刷屏。
   - 结果呈递遵循「谁发起、回给谁」原则：节点在收到 WebSocket 变更事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`input-required`）写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / Hook 消费并在当前对话界面中直接回复用户。去重键记在 `present_state.json` 与线上的 `Tasks.Metadata.presented_keys`，并标记 `Presented="Yes"`。
   - 特殊归属：`From_Node` 或 `Source` 为 `"hub"` 或 `"cron"`（定时任务）的任务，统一由 `role=hub` 的主节点收入其 `present_queue.jsonl`，交由主节点 Agent 汇报。
-- **呈递去重**按「任务＋当前 Status_Msg」即 (Task_ID, Status_Msg) 计，终态再带上 Status。同一任务每出现一条新的 question / auth_request 都是新的呈递项，答复续跑或批准后到达的终态结果也要再呈递一次。已呈递的 Msg_ID 记在 Tasks.Metadata；Presented 只表示该任务当前状态是否已呈递，不能单独作为去重依据。
+- **呈递去重**按「任务＋当前 Status_Msg」即 (Task_ID, Status_Msg) 计，终态再带上 Status。同一任务每出现一条新的 question / auth_request 都是新的呈递项，答复续跑或批准后到达的终态结果也要再呈递一次。已呈递的 Msg_ID 记在 Tasks.Metadata；Presented 只表示该任务当前状态是否已呈递，不能单独作为去重依据。初次装机或初次启动时，若本地呈递状态不存在，自动以线上存量终态或已呈递任务建立装机水位线（Baseline），避免向本地队列倾倒全部历史已完成任务。
 
 ## 修订记录
+
+**v3.3（2026-11-07，容器与无 TTY 适配、呈递水位线 Baseline、通用 Agent 收件箱）**：
+- 增强容器、Agent VM 与无 TTY 部署能力：systemd 服务在缺少 user session 时回退系统级 unit 或脱机后台拉起；应用缺少 app.info 权限时事件自检放行，优先读取环境变量凭据。
+- 呈递水位线（Baseline）：首次启动或 setup 完成时自动将存量历史终态任务写入 present_state.json，彻底防止存量 Base 历史刷屏。
+- 区分独立 Agent 节点与编排宿主：增加 paseo 与 orca 探测，提供内置通用收件箱执行器 agent-inbox.mjs；`lah task create` 支持 `--skill` 并支持省略 `--cap` 自动挑选目标节点首选能力。
 
 **v3.2（2026-11-07，原路返回与本地队列呈递，飞书仅发审批卡）**：
 - 明确任何节点均可作为任务发起入口，`lah task create` 默认以本机为 `From_Node` 与 `Tasks.Source`。
@@ -223,7 +228,7 @@
 - 实现是 Node 版 `lah daemon --role node|hub`（命令 `hub-node` 兼容别名可用）。省略 `--role` 时读该进程配置目录里 `node.json` 的 `role`，缺省为 node。单进程、单配置目录即可同时承载干活与枢纽职责，无需再拆两个进程与配置目录。
 - hub 角色的职责：
   1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务（含定时任务）；
-  2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能）；
+  2. 建单与路由：按 Rules 与 AgentCards 选目标（Rules 自动路由仍为计划）；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `lah task create`，由调用方指定目标节点与技能，省略技能时由中台按目标节点在 AgentCards 登记的名片自动挑选首选技能，亦可通过 --cap 反查目标节点）；
   3. 审批中继：给机主发审批卡；处理卡片回调时校验操作者是机主本人；通过后写 auth_decision（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg），并按决定把任务置回 submitted 或置 canceled（§8.3）；
   4. 取消：写 canceled（审批驳回，或代发起方落表取消请求）；
   5. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；飞书端只发审批卡，不发大段文本刷屏；

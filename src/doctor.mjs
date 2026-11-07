@@ -73,20 +73,39 @@ export async function checkAppEventSubscribed(bus, appId, eventType = "drive.fil
     const appData = appRes?.app ?? appRes?.data?.app;
     const onlineVersionId = appData?.online_version_id;
     if (!onlineVersionId) {
-      return { ok: false, error: "应用未发布线上版本" };
+      return { ok: false, status: "unknown", reason: "未获取到线上发布版本 ID" };
     }
     const verRes = await bus.api("GET", `/application/v6/applications/${appId}/app_versions/${onlineVersionId}?lang=zh_cn`);
     const verData = verRes?.app_version ?? verRes?.data?.app_version;
-    const eventInfos = verData?.event_infos ?? [];
+    const eventInfos = verData?.event_infos;
+    if (!Array.isArray(eventInfos)) {
+      return { ok: false, status: "unknown", onlineVersionId, reason: "应用版本数据不含事件订阅列表" };
+    }
     const subscribed = eventInfos.some((e) => e.event_type === eventType);
+    if (subscribed) {
+      return {
+        ok: true,
+        status: "subscribed",
+        onlineVersionId,
+        subscribed: true,
+        eventInfos,
+      };
+    }
     return {
-      ok: subscribed,
+      ok: false,
+      status: "unsubscribed",
       onlineVersionId,
-      subscribed,
+      subscribed: false,
       eventInfos,
+      reason: "线上版本已发布但未订阅该事件",
     };
   } catch (e) {
-    return { ok: false, error: e.message };
+    const msg = e?.message || "";
+    return {
+      ok: false,
+      status: "unknown",
+      reason: `未开通应用版本查询权限或接口不可达（${msg.slice(0, 100)}）`,
+    };
   }
 }
 
@@ -235,11 +254,13 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
     if (role === "hub" || cfg.events === true) {
       const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
-      if (appEvCheck.ok) {
+      if (appEvCheck.status === "subscribed") {
         ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
+      } else if (appEvCheck.status === "unknown") {
+        info(`跳过应用静态事件列表核对（${appEvCheck.reason || "未开应用信息权限"}），以实际长连接状态为准`);
       } else {
-        bad(`应用线上已发布版本未订阅事件 drive.file.bitable_record_changed_v1${appEvCheck.error ? `（${appEvCheck.error}）` : ""}`);
-        info(`请打开 https://open.feishu.cn/app/${cfg.bus.appId}/event 添加「多维表格记录变更 (drive.file.bitable_record_changed_v1)」并发布版本，或降级为 45s 轮询模式。`);
+        bad(`应用线上已发布版本未订阅事件 drive.file.bitable_record_changed_v1（${appEvCheck.reason || "未包含该事件"}）`);
+        info(`请打开 https://open.feishu.cn/app/${cfg.bus.appId}/event 添加「多维表格记录变更」并发布版本，或降级为 45s 轮询模式。`);
         problems++;
       }
 
@@ -271,8 +292,10 @@ export async function doctor(configDir, appDir, opts = {}) {
       }
     } else {
       const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
-      if (appEvCheck.ok) {
+      if (appEvCheck.status === "subscribed") {
         ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
+      } else if (appEvCheck.status === "unknown") {
+        info(`跳过应用静态事件列表核对（${appEvCheck.reason || "未开应用信息权限"}）`);
       } else {
         info(`应用线上版本未订阅 drive.file.bitable_record_changed_v1（当前为轮询模式已忽略）`);
       }

@@ -420,7 +420,7 @@ if (cmd === "setup") {
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
   lah host    [--config <dir>]    carrier 语境进程（在终端里常驻代跑）
-  lah task create --to <node> --cap <cap_id> [--text <指令>] [--from <node>] [--params <json 或 @文件>]
+  lah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>]
   lah task reply  --task <Task_ID> --text <答复内容>
   lah task show   <Task_ID>
   lah present     [--pop]  读取本机结果呈递队列（--pop 同时清空）`);

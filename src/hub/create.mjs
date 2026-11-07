@@ -69,7 +69,7 @@ export function parseCreateArgv(argv) {
     else if (flag === "--from") out.from = take(i, flag);
     else if (flag === "--source") out.source = take(i, flag);
     else if (flag === "--to") out.to = take(i, flag);
-    else if (flag === "--cap") out.cap = take(i, flag);
+    else if (flag === "--cap" || flag === "--skill") out.cap = take(i, flag);
     else if (flag === "--text") out.text = take(i, flag);
     else if (flag === "--params") out.paramsRaw = take(i, flag);
     else if (flag === "--context") out.context = take(i, flag);
@@ -78,8 +78,9 @@ export function parseCreateArgv(argv) {
     else throw new Error("无法识别的参数：" + flag);
     if (flag.startsWith("--")) i++;
   }
-  if (!String(out.to).trim()) throw new Error("task create 需要 --to <node>");
-  if (!String(out.cap).trim()) throw new Error("task create 需要 --cap <cap_id>");
+  if (!String(out.to).trim() && !String(out.cap).trim()) {
+    throw new Error("task create 需要指定 --to <node> 或 --cap/--skill <cap_id>");
+  }
   return out;
 }
 
@@ -114,10 +115,65 @@ export async function createTask({
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
     throw new Error("总线缺少 messages / parts / tasks 表");
   }
-  const node = String(to ?? "").trim();
-  const skill = String(cap ?? "").trim();
-  if (!node) throw new Error("task create 需要 --to <node>");
-  if (!skill) throw new Error("task create 需要 --cap <cap_id>");
+  let node = String(to ?? "").trim();
+  let skill = String(cap ?? "").trim();
+
+  // 若总线提供了 AgentCards 表，尝试自动解析能力与节点
+  if (bus.tables.agentCards) {
+    let cards = [];
+    try {
+      cards = await bus.listRecords(bus.tables.agentCards);
+    } catch { /* 忽略查询错误 */ }
+
+    // 1. 若提供了 cap：尝试在 AgentCards 中精确查找 Cap_ID 或 Skill_ID
+    if (skill) {
+      const matchCap = cards.find((c) => String(f1(c, "Cap_ID") ?? "").trim() === skill);
+      if (matchCap) {
+        skill = String(f1(matchCap, "Skill_ID") ?? "").trim() || skill;
+        if (!node) node = String(f1(matchCap, "Node") ?? "").trim();
+      } else {
+        const matchSkill = cards.find((c) => {
+          const s = String(f1(c, "Skill_ID") ?? "").trim();
+          const n = node ? String(f1(c, "Node") ?? "").trim() === node : true;
+          return n && s === skill;
+        });
+        if (matchSkill) {
+          skill = String(f1(matchSkill, "Skill_ID") ?? "").trim();
+          if (!node) node = String(f1(matchSkill, "Node") ?? "").trim();
+        } else if (skill.startsWith("CAP-")) {
+          // 形如 CAP-<prefix>-<skill>，若未在表里找到，提取末尾 skill
+          const parts = skill.split("-");
+          if (parts.length >= 3) {
+            skill = parts.slice(2).join("-");
+          }
+        }
+      }
+    }
+
+    // 2. 若未提供 cap 但提供了 to（目标节点）：自动挑选该节点的首选技能
+    if (!skill && node) {
+      const nodeCards = cards.filter((c) => String(f1(c, "Node") ?? "").trim() === node);
+      if (nodeCards.length > 0) {
+        const isOnline = (c) => String(f1(c, "Availability") ?? "").toLowerCase() !== "offline";
+        const priority = (c) => {
+          const sid = String(f1(c, "Skill_ID") ?? "").toLowerCase();
+          const online = isOnline(c) ? 10 : 0;
+          if (sid === "ops-agent") return 100 + online;
+          if (sid === "agent") return 90 + online;
+          if (sid.endsWith("-agent")) return 80 + online;
+          if (sid.includes("agent")) return 70 + online;
+          if (sid !== "echo-test") return 50 + online;
+          return 10 + online;
+        };
+        const sorted = nodeCards.slice().sort((a, b) => priority(b) - priority(a));
+        const chosen = sorted[0];
+        skill = String(f1(chosen, "Skill_ID") ?? "").trim();
+      }
+    }
+  }
+
+  if (!node) throw new Error("task create 需要 --to <node>（或提供可在 AgentCards 反查到节点的 --cap/--skill）");
+  if (!skill) throw new Error(`task create 未指定 --cap/--skill，且目标节点 ${node} 未登记任何可用能力`);
   const sender = String(from || source || "hub").trim();
   const taskSource = String(source || from || "hub").trim();
   const data = parseParams(params);

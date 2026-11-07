@@ -135,11 +135,11 @@ function readState(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     const keys = Array.isArray(parsed?.keys) ? parsed.keys.filter((k) => typeof k === "string") : [];
-    return { keys };
+    return { keys, exists: true };
   } catch (e) {
-    if (e.code === "ENOENT") return { keys: [] };
+    if (e.code === "ENOENT") return { keys: [], exists: false };
     // 读坏了就当没有发过。重发一次好过把新结果永久吞掉。
-    return { keys: [], broken: e.message };
+    return { keys: [], broken: e.message, exists: false };
   }
 }
 
@@ -175,6 +175,35 @@ export class PresentService {
     const seen = new Set(state.keys);
     const tasks = await this.bus.listRecords(this.bus.tables.tasks);
     const messages = await this.bus.listRecords(this.bus.tables.messages);
+
+    // 装机水位线（baseline）：若是首次运行（本地不存在 present_state.json），
+    // 将线上存量的终态任务（completed / failed / rejected / canceled）或已标记 Presented="Yes" 的任务
+    // 直接视为已呈递历史基线，记录到 present_state.json 中，防止首次启动向本地队列倾倒全部历史回执。
+    if (!state.exists) {
+      for (const task of tasks) {
+        const status = String(f1(task, "Status") ?? "");
+        const taskId = String(f1(task, "Task_ID") ?? "");
+        if (!taskId) continue;
+        const presented = String(f1(task, "Presented") ?? "").toLowerCase();
+        const isTerminal = TERMINAL_STATUSES.has(status) || status === "canceled";
+        if (isTerminal || presented === "yes") {
+          const statusMsg = String(f1(task, "Status_Msg") ?? "");
+          const key = presentKey(taskId, status, statusMsg);
+          seen.add(key);
+          if (!state.keys.includes(key)) state.keys.push(key);
+          for (const mk of metaKeys(task)) {
+            seen.add(mk);
+            if (!state.keys.includes(mk)) state.keys.push(mk);
+          }
+        }
+      }
+      try {
+        writeState(this.statePath, state);
+        this.log(`首次启动建立结果呈递水位线（baseline）：已标记 ${state.keys.length} 项历史存量终态任务`);
+      } catch (e) {
+        this.log("首次写入 present_state.json baseline 失败：" + (e?.message ?? e));
+      }
+    }
 
     const pending = [];
     for (const task of tasks) {

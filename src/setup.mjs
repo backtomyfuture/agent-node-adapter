@@ -47,13 +47,43 @@ function parseFlags(argv) {
 }
 
 function richPath() {
-  const extra = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local/bin")];
+  const extra = [
+    path.join(os.homedir(), ".local/bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    path.join(os.homedir(), ".npm-global/bin"),
+    path.join(os.homedir(), ".bun/bin"),
+    path.join(os.homedir(), ".cargo/bin"),
+    path.join(os.homedir(), ".antigravity/antigravity/bin"),
+    path.join(os.homedir(), ".amp/bin"),
+    path.join(os.homedir(), ".grok/bin"),
+  ];
   const cur = (process.env.PATH || "").split(path.delimiter);
   return [...new Set([...extra, ...cur])].join(path.delimiter);
 }
 
+function findExecutable(binName) {
+  const dirs = richPath().split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const fullPath = path.join(dir, binName);
+    try {
+      if (fs.existsSync(fullPath)) {
+        fs.accessSync(fullPath, fs.constants.X_OK);
+        return fullPath;
+      }
+    } catch { /* 不可执行或不存在 */ }
+  }
+  return null;
+}
+
+function findLarkCliBin() {
+  return findExecutable("lark-cli") || "lark-cli";
+}
+
 function run(cmd, args, opts = {}) {
-  return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, stdio: ["ignore", "pipe", "ignore"], ...opts });
+  const resolvedCmd = cmd === "lark-cli" ? findLarkCliBin() : cmd;
+  return execFileSync(resolvedCmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, stdio: ["ignore", "pipe", "ignore"], ...opts });
 }
 
 function checkDriveSubscription(baseToken, appId) {
@@ -171,8 +201,12 @@ function ensureLarkCli() {
 function readLarkConfig() {
   const candidates = [
     path.join(os.homedir(), ".lark-cli", "config.json"),
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "config.json") : null,
     path.join(os.homedir(), ".config", "lark-cli", "config.json"),
-  ];
+    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "config.json"),
+    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "config.json") : null,
+    path.join(os.homedir(), ".local", "share", "lark-cli", "config.json"),
+  ].filter(Boolean);
   for (const p of candidates) {
     try {
       const d = JSON.parse(fs.readFileSync(p, "utf8"));
@@ -204,8 +238,18 @@ function parseMasterKey(raw) {
 function loadMasterKey() {
   const fileCandidates = [
     path.join(os.homedir(), "Library", "Application Support", "lark-cli", "master.key.file"),
+    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "master.key"),
+    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "master.key.file") : null,
+    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "master.key") : null,
     path.join(os.homedir(), ".local", "share", "lark-cli", "master.key.file"),
-  ];
+    path.join(os.homedir(), ".local", "share", "lark-cli", "master.key"),
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "master.key.file") : null,
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "master.key") : null,
+    path.join(os.homedir(), ".config", "lark-cli", "master.key.file"),
+    path.join(os.homedir(), ".config", "lark-cli", "master.key"),
+    path.join(os.homedir(), ".lark-cli", "master.key.file"),
+    path.join(os.homedir(), ".lark-cli", "master.key"),
+  ].filter(Boolean);
   for (const fp of fileCandidates) {
     try {
       if (fs.existsSync(fp)) {
@@ -224,6 +268,14 @@ function loadMasterKey() {
     } catch { /* 忽略 */ }
   }
 
+  if (process.platform === "linux") {
+    try {
+      const out = run("secret-tool", ["lookup", "service", "lark-cli", "username", "master.key"]).trim();
+      const key = parseMasterKey(out);
+      if (key) return key;
+    } catch { /* 忽略 */ }
+  }
+
   return null;
 }
 
@@ -235,8 +287,12 @@ function decryptLarkCliSecret(secretId) {
   const encFileName = secretId.replace(/[^a-zA-Z0-9._-]/g, "_") + ".enc";
   const dirCandidates = [
     path.join(os.homedir(), "Library", "Application Support", "lark-cli"),
+    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli") : null,
     path.join(os.homedir(), ".local", "share", "lark-cli"),
-  ];
+    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli") : null,
+    path.join(os.homedir(), ".config", "lark-cli"),
+    path.join(os.homedir(), ".lark-cli"),
+  ].filter(Boolean);
 
   for (const dir of dirCandidates) {
     const encPath = path.join(dir, encFileName);
@@ -479,7 +535,7 @@ function isUnfinishedExample(raw) {
 function isExampleCommands(obj) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
   if (Object.hasOwn(obj, "lan-exec")) return true;
-  return Object.values(obj).some((e) => typeof e?.command === "string" && e.command.includes("../src/executors/echo.mjs"));
+  return Object.values(obj).some((e) => typeof e?.command === "string" && (e.command.includes("../src/executors/echo.mjs") || e.command.includes("../src/executors/agent-inbox.mjs")));
 }
 
 function echoSeed(appDir) {
@@ -491,35 +547,15 @@ function echoSeed(appDir) {
       name: "回声测试",
       side_effect: "read",
     },
+    "agent-inbox": {
+      command: `node ${JSON.stringify(path.join(appDir, "src", "executors", "agent-inbox.mjs"))}`,
+      desc: "通用 Agent 收件箱：接收任务并记录至本地 inbox 队列",
+      mode: "json",
+      name: "Agent 收件箱",
+      side_effect: "write",
+      approval_class: "auto",
+    },
   };
-}
-
-function findExecutable(binName) {
-  const extra = [
-    path.join(os.homedir(), ".local/bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    path.join(os.homedir(), ".bun/bin"),
-    path.join(os.homedir(), ".cargo/bin"),
-    path.join(os.homedir(), ".npm-global/bin"),
-    path.join(os.homedir(), ".antigravity/antigravity/bin"),
-    path.join(os.homedir(), ".amp/bin"),
-    path.join(os.homedir(), ".grok/bin"),
-  ];
-  const cur = (process.env.PATH || "").split(path.delimiter);
-  const dirs = [...new Set([...extra, ...cur])];
-
-  for (const dir of dirs) {
-    if (!dir) continue;
-    const fullPath = path.join(dir, binName);
-    try {
-      if (fs.existsSync(fullPath)) {
-        fs.accessSync(fullPath, fs.constants.X_OK);
-        return fullPath;
-      }
-    } catch { /* 不可执行或不存在 */ }
-  }
-  return null;
 }
 
 const KNOWN_AGENTS = [
@@ -600,6 +636,20 @@ const KNOWN_AGENTS = [
     cmdTemplate: (b) => `${b} --message {prompt} --yes`,
     desc: "以 Aider (aider) 为执行主体，处理本地代码修改任务",
   },
+  {
+    bin: "paseo",
+    skill: "paseo-agent",
+    name: "Paseo Agent",
+    cmdTemplate: (b) => `${b} agent run {prompt}`,
+    desc: "以 Paseo (paseo) 为执行主体，调度 Paseo 宿主或 Agent 执行复杂编排任务",
+  },
+  {
+    bin: "orca",
+    skill: "orca-agent",
+    name: "Orca Agent",
+    cmdTemplate: (b) => `${b} task run {prompt}`,
+    desc: "以 Orca CLI (orca) 为执行主体，带多 Agent 与工作区环境执行终端与协同任务",
+  },
 ];
 
 export function discoverLocalAgents() {
@@ -646,11 +696,27 @@ function buildAgentCommands(selectedAgents, existingCommands = {}) {
 }
 
 function envSecret() {
-  const hub = (process.env.HUB_APP_SECRET || "").trim();
-  if (hub) return { value: hub, source: "环境变量 HUB_APP_SECRET" };
-  const app = (process.env.APP_SECRET || "").trim();
-  if (app) return { value: app, source: "环境变量 APP_SECRET" };
+  const candidates = [
+    { key: "HUB_APP_SECRET", val: process.env.HUB_APP_SECRET },
+    { key: "APP_SECRET", val: process.env.APP_SECRET },
+    { key: "FEISHU_APP_SECRET", val: process.env.FEISHU_APP_SECRET },
+    { key: "LARK_APP_SECRET", val: process.env.LARK_APP_SECRET },
+  ];
+  for (const c of candidates) {
+    const v = (c.val || "").trim();
+    if (v) return { value: v, source: `环境变量 ${c.key}` };
+  }
   return null;
+}
+
+function envAppId() {
+  return (
+    process.env.HUB_APP_ID ||
+    process.env.APP_ID ||
+    process.env.FEISHU_APP_ID ||
+    process.env.LARK_APP_ID ||
+    ""
+  ).trim() || null;
 }
 
 // 只读权限刚好是 600 的普通文件。更松的权限或符号链接一律不读，避免把 Secret 从暴露的文件载入内存。
@@ -747,7 +813,7 @@ export async function runSetup(configDir, argv, appDir) {
 
     const fromEnv = envSecret();
     const fileCreds = readLockedAppEnv(configDir);
-    let appId = flags.appId || null;
+    let appId = flags.appId || envAppId() || null;
     let secret = fromEnv?.value || null;
     let secretSource = fromEnv?.source || null;
     if (!secret && fileCreds?.secret) { secret = fileCreds.secret; secretSource = "本机 app.env（600）"; }
@@ -955,10 +1021,12 @@ export async function runSetup(configDir, argv, appDir) {
     // 5. 事件订阅检查与唤醒方式配置
     console.log("  · 正在检查事件订阅就绪状态…");
     const appEvRes = await checkAppEventSubscribed(bus, appId, "drive.file.bitable_record_changed_v1");
-    if (appEvRes.ok) {
+    if (appEvRes.status === "subscribed") {
       console.log(`  ✓ 应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvRes.onlineVersionId}）`);
+    } else if (appEvRes.status === "unknown") {
+      console.log(`  · 跳过应用静态事件列表核对（${appEvRes.reason || "未开应用信息权限"}），以实际长连接状态为准`);
     } else {
-      console.log(`  · 应用线上版本未订阅 drive.file.bitable_record_changed_v1 事件${appEvRes.error ? `（${appEvRes.error}）` : ""}`);
+      console.log(`  · 应用线上版本未订阅 drive.file.bitable_record_changed_v1 事件（${appEvRes.reason || "未包含该事件"}）`);
       console.log(`    若需开启，请在飞书开放平台「事件与回调」添加「多维表格记录变更」并发布版本：https://open.feishu.cn/app/${appId}/event`);
     }
 
@@ -972,7 +1040,7 @@ export async function runSetup(configDir, argv, appDir) {
       console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
     }
 
-    const allEventsReady = appEvRes.ok && subRes.success;
+    const allEventsReady = (appEvRes.status === "subscribed" || appEvRes.status === "unknown") && subRes.success;
 
     let events = false;
     let pollSec = 45;
@@ -1075,7 +1143,7 @@ export async function runSetup(configDir, argv, appDir) {
         selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
       }
     } else {
-      console.log("  · 未扫描到常见本机终端 Agent（仅配置 echo-test 种子能力）");
+      console.log("  · 未扫描到常见本机终端 Agent（已配置 echo-test 与 agent-inbox 基础能力）");
     }
 
     const cmdPath = path.join(configDir, "commands.json");
@@ -1096,6 +1164,36 @@ export async function runSetup(configDir, argv, appDir) {
     fs.writeFileSync(cmdPath, JSON.stringify(finalCmds, null, 1) + "\n");
     const names = Object.keys(finalCmds);
     console.log(`  ✓ 已写入 app.env（600）、node.json、commands.json（共 ${names.length} 项能力：${names.join(", ")}）`);
+
+    // 建立存量任务结果呈递水位线（baseline）：
+    // 若本地 present_state.json 不存在，查询 Tasks 表将存量终态任务初始化记入，避免初启重放历史回执
+    const presentStateFile = path.join(configDir, "present_state.json");
+    if (!fs.existsSync(presentStateFile)) {
+      try {
+        const { f1 } = await import("./bus/feishu.mjs");
+        const existingTasks = await bus.listRecords(tables.tasks);
+        const baseKeys = [];
+        for (const t of existingTasks) {
+          const st = String(f1(t, "Status") ?? "");
+          const tid = String(f1(t, "Task_ID") ?? "");
+          if (!tid) continue;
+          const pres = String(f1(t, "Presented") ?? "").toLowerCase();
+          const isTerm = ["completed", "failed", "rejected", "canceled"].includes(st);
+          if (isTerm || pres === "yes") {
+            const smsg = String(f1(t, "Status_Msg") ?? "");
+            const k = (["completed", "failed", "rejected"].includes(st)) ? `${tid}\t${st}\t${smsg}` : `${tid}\t${smsg}`;
+            if (!baseKeys.includes(k)) baseKeys.push(k);
+          }
+        }
+        fs.writeFileSync(presentStateFile, JSON.stringify({ keys: baseKeys }, null, 1), { mode: 0o600 });
+        fs.chmodSync(presentStateFile, 0o600);
+        if (baseKeys.length > 0) {
+          console.log(`  ✓ 已建立存量任务结果呈递水位线（共 ${baseKeys.length} 项历史任务，避免首次启动重放）`);
+        }
+      } catch (e) {
+        console.log("  · 存量任务水位线建立跳过：" + e.message);
+      }
+    }
 
     // 自动为本机 Agent 安装 lah 技能
     try {
