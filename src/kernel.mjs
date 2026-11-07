@@ -1550,16 +1550,23 @@ export class Kernel {
   }
 
   async markOffline() {
+    let rows;
     try {
-      const rows = await this.bus.listRecords(this.T.agentCards);
-      for (const row of rows) {
+      rows = await this.bus.listRecords(this.T.agentCards);
+    } catch (e) {
+      log("mark offline failed: " + (e?.message ?? e));
+      return;
+    }
+    for (const row of rows) {
+      const capId = f1(row, "Cap_ID") || row.record_id;
+      try {
         if (f1(row, "Node") !== this.cfg.node) continue;
         if (String(f1(row, "Availability") ?? "").toLowerCase() === "offline") continue;
         await this.bus.updateRecord(this.T.agentCards, row.record_id, { Availability: "offline" });
-        log("card offline on shutdown " + f1(row, "Cap_ID"));
+        log("card offline on shutdown " + capId);
+      } catch (e) {
+        log("mark offline failed: " + (e?.message ?? e) + " " + capId);
       }
-    } catch (e) {
-      log("mark offline failed: " + (e?.message ?? e));
     }
   }
 
