@@ -2,7 +2,7 @@
 // 做完的事：确认 lark-cli 在位（不在则用 npm 装）；复用 lark-cli 已配置的
 // 飞书应用（凭据只在本机流转：配置文件 / macOS 钥匙串 / 环境变量 /
 // 已有 600 的 app.env -> 本机 app.env，绝不打印明文，也不接受命令行 Secret）；
-// 向 Base 自动发现六张表的 ID 并写入 node.json；种子能力只放绝对路径 echo-test；
+// 向 Base 自动发现六张表的 ID 并写入 node.json；host 节点按本机已装 CLI Agent 生成能力（不预置任何占位能力）；
 // 最后跑 doctor 自检，可选顺带注册开机自启。
 // 已有 lark-cli 配置是主路径；没有时给出确切的下一步（lark-cli config init）。
 
@@ -540,18 +540,6 @@ function isExampleCommands(obj) {
   return Object.values(obj).some((e) => typeof e?.command === "string" && e.command.includes("../src/executors/echo.mjs"));
 }
 
-function echoSeed(appDir) {
-  return {
-    "echo-test": {
-      command: `node ${JSON.stringify(path.join(appDir, "src", "executors", "echo.mjs"))}`,
-      desc: "链路自检：回显任务参数",
-      mode: "json",
-      name: "回声测试",
-      side_effect: "read",
-    },
-  };
-}
-
 const KNOWN_AGENTS = [
   {
     bin: "claude",
@@ -673,18 +661,6 @@ function buildAgentCommands(selectedAgents, existingCommands = {}) {
   const result = { ...existingCommands };
   for (const a of selectedAgents) {
     result[a.skill] = a.entry;
-  }
-  if (selectedAgents.length > 0 && !result["ops-agent"]) {
-    const primary = selectedAgents[0];
-    result["ops-agent"] = {
-      command: primary.entry.command,
-      desc: `以 ${primary.name} 为执行主体，带本机终端与工具面处理开放式运维与通用任务`,
-      mode: "agent",
-      name: "通用运维代理",
-      side_effect: "write",
-      approval_class: "auto",
-      timeout_sec: 900,
-    };
   }
   return result;
 }
@@ -1163,7 +1139,7 @@ export async function runSetup(configDir, argv, appDir) {
 
         let pick = "all";
         if (interactive) {
-          pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=仅保留 echo-test，或填序号如 1,2,3）", "all");
+          pick = await ask("选择要添加到 commands.json 的本地 Agent（all=全部添加，none=都不添加，或填序号如 1,2,3）", "all");
         }
         const p = String(pick).trim().toLowerCase();
         if (p === "none" || p === "0") {
@@ -1175,10 +1151,10 @@ export async function runSetup(configDir, argv, appDir) {
           selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
         }
       } else {
-        console.log("  · 未扫描到常见本机终端 Agent（已配置 echo-test 基础能力）");
+        console.log("  · 未扫描到常见本机终端 Agent（本机暂无可接单能力，装好后重跑 lah setup 或手写 commands.json）");
       }
 
-      const baseCmds = (!cmdExisted || isExample) ? echoSeed(appDir) : existingCmds;
+      const baseCmds = (!cmdExisted || isExample) ? {} : existingCmds;
       finalCmds = buildAgentCommands(selectedAgents, baseCmds);
     }
 

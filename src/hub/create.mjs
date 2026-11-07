@@ -164,11 +164,9 @@ export async function createTask({
             if (meta?.kind === "agent" || meta?.mode === "inbox") isAgentNode = true;
           } catch {}
           if (sid === "agent" || isAgentNode) return 200 + online;
-          if (sid === "ops-agent") return 100 + online;
           if (sid.endsWith("-agent")) return 80 + online;
           if (sid.includes("agent")) return 70 + online;
-          if (sid !== "echo-test") return 50 + online;
-          return 10 + online;
+          return 50 + online;
         };
         const sorted = nodeCards.slice().sort((a, b) => priority(b) - priority(a));
         const chosen = sorted[0];

@@ -176,7 +176,8 @@ export async function doctor(configDir, appDir, opts = {}) {
     if (fs.existsSync(cmdsPath)) {
       const cmds = JSON.parse(fs.readFileSync(cmdsPath, "utf8"));
       const names = Object.keys(cmds);
-      ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
+      if (names.length) ok(`commands.json：${names.length} 项能力（${names.join(", ")}）`);
+      else info("commands.json 为空：本节点不登记任何能力，不会认领任务");
       for (const [name, entry] of Object.entries(cmds)) {
         if (!entry.command && entry.mode !== "inbox") { bad(`能力 ${name} 缺 command 模板`); problems++; }
       }

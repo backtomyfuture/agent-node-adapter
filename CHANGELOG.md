@@ -5,11 +5,16 @@
 
 ## [Unreleased]
 
+- host 节点能力表去掉预置占位能力：
+  - `lah setup` 不再种入 `echo-test`，也不再用首个 Agent 自动派生重复的 `ops-agent`；host 节点的能力只来自用户选定的本机 CLI Agent，一个 Agent 对应一项能力。未扫描到任何 Agent 时 `commands.json` 为空，`lah doctor` 给出提示；
+  - `lah task create` 省略 `--cap` 时的选择规则：独立 Agent 的 `agent` 优先，其次是 `*-agent` 类能力；
+  - 已有节点的存量 `commands.json` 不会被改写，需要的话手工删除对应条目，重启后其名片会被置为 `Dispatchable=No`。
+
 - 节点类型区分（host 电脑宿主 vs agent 独立 Agent）与异步收件箱 inbox 模式（中台标准 v3.4）：
   - **`node.json` 新增 `kind: "host" | "agent"`（缺省 host，向下兼容）**：
     - `lah setup` 新增 `--kind host|agent` 参数，交互模式下提示选择电脑宿主（1=host）或独立 Agent 本尊（2=agent）；
     - **`kind: agent` 纯净独立能力注册**：setup 阶段**绝不调用 `discoverLocalAgents()`**，不扫描 PATH、不注册任何外部 CLI；唯一注册能力为 `agent`（`name` 为节点名，`mode: "inbox"`，`inbox_timeout_sec: 86400`）；
-    - `kind: host` 保持现行电脑宿主行为（自动探测本机 CLI Agent，基础能力仅保留 `echo-test`，移除 `agent-inbox` 占位）；
+    - `kind: host` 保持现行电脑宿主行为（自动探测本机 CLI Agent，移除 `agent-inbox` 占位）；
     - `lah doctor` 与 `AgentCards` 登记按 kind 清晰展示节点类型；
     - `lah task create` 省略 `--cap` 派发给 agent 类型节点时，自动直达其 `agent` 能力；
   - **新增 `mode: "inbox"` 异步接单执行模式**：
