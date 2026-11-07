@@ -6,6 +6,7 @@
 // 最后跑 doctor 自检，可选顺带注册开机自启。
 // 已有 lark-cli 配置是主路径；没有时给出确切的下一步（lark-cli config init）。
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -52,11 +53,31 @@ function richPath() {
 }
 
 function run(cmd, args, opts = {}) {
-  return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, ...opts });
+  return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, stdio: ["ignore", "pipe", "ignore"], ...opts });
+}
+
+function checkDriveSubscription(baseToken, appId) {
+  try {
+    const args = [
+      "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
+      "--params", JSON.stringify({ file_type: "bitable" }),
+      "--as", "user",
+      "--json",
+    ];
+    const out = run("lark-cli", args);
+    const parsed = JSON.parse(out);
+    if (parsed?.data?.is_subscribe === true) return { subscribed: true };
+    return { subscribed: false, error: parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "未订阅" : out.trim()) };
+  } catch (e) {
+    return { subscribed: false, error: e.message };
+  }
 }
 
 // 尝试以当前用户身份向 Base 注册云文档事件订阅（ws 秒级门铃所需）
-function tryRegisterDriveSubscription(baseToken) {
+function tryRegisterDriveSubscription(baseToken, appId) {
+  const before = checkDriveSubscription(baseToken, appId);
+  if (before.subscribed) return { success: true };
+
   try {
     const out = run("lark-cli", [
       "api", "POST", `/open-apis/drive/v1/files/${baseToken}/subscribe`,
@@ -65,9 +86,12 @@ function tryRegisterDriveSubscription(baseToken) {
       "--json",
     ]);
     const parsed = JSON.parse(out);
-    if (parsed?.ok || parsed?.code === 0) return { success: true };
-    return { success: false, error: parsed?.error?.message || parsed?.msg || out.trim() };
+    const after = checkDriveSubscription(baseToken, appId);
+    if (after.subscribed) return { success: true };
+    return { success: false, error: parsed?.error?.message || parsed?.msg || after.error || out.trim() };
   } catch (e) {
+    const after = checkDriveSubscription(baseToken, appId);
+    if (after.subscribed) return { success: true };
     return { success: false, error: e.message };
   }
 }
@@ -116,17 +140,101 @@ function readLarkConfig() {
   return null;
 }
 
+function parseMasterKey(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  let s = raw.trim();
+  if (s.startsWith("go-keyring-base64:")) {
+    try {
+      s = Buffer.from(s.slice("go-keyring-base64:".length), "base64").toString("utf8").trim();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const key = Buffer.from(s, "base64");
+    if (key.length === 32) return key;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function loadMasterKey() {
+  const fileCandidates = [
+    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "master.key.file"),
+    path.join(os.homedir(), ".local", "share", "lark-cli", "master.key.file"),
+  ];
+  for (const fp of fileCandidates) {
+    try {
+      if (fs.existsSync(fp)) {
+        const content = fs.readFileSync(fp, "utf8").trim();
+        const key = parseMasterKey(content);
+        if (key) return key;
+      }
+    } catch { /* 下一个 */ }
+  }
+
+  if (process.platform === "darwin") {
+    try {
+      const out = run("security", ["find-generic-password", "-s", "lark-cli", "-a", "master.key", "-w"]).trim();
+      const key = parseMasterKey(out);
+      if (key) return key;
+    } catch { /* 忽略 */ }
+  }
+
+  return null;
+}
+
+function decryptLarkCliSecret(secretId) {
+  if (!secretId || typeof secretId !== "string") return null;
+  const key = loadMasterKey();
+  if (!key) return null;
+
+  const encFileName = secretId.replace(/[^a-zA-Z0-9._-]/g, "_") + ".enc";
+  const dirCandidates = [
+    path.join(os.homedir(), "Library", "Application Support", "lark-cli"),
+    path.join(os.homedir(), ".local", "share", "lark-cli"),
+  ];
+
+  for (const dir of dirCandidates) {
+    const encPath = path.join(dir, encFileName);
+    try {
+      if (!fs.existsSync(encPath)) continue;
+      const buf = fs.readFileSync(encPath);
+      if (buf.length < 12 + 16) continue;
+      const iv = buf.subarray(0, 12);
+      const tag = buf.subarray(buf.length - 16);
+      const ciphertext = buf.subarray(12, buf.length - 16);
+
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(tag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+      if (decrypted) return decrypted;
+    } catch { /* 下一个目录或失败 */ }
+  }
+
+  return null;
+}
+
 // 从 lark-cli 的应用条目里解析出 secret 明文；只在本机内存里流转，绝不打印。
-// 形态：明文字符串 / {"source":"keychain","id":...}（macOS 钥匙串引用）。
+// 形态：明文字符串 / 新版 lark-cli 安全存储（AES-256-GCM 文件） / 旧版 macOS 钥匙串引用。
 function resolveSecret(app) {
   const s = app?.appSecret;
   if (typeof s === "string" && s) return { value: s, source: "lark-cli 配置（明文）" };
-  if (s && typeof s === "object" && s.source === "keychain" && s.id && process.platform === "darwin") {
-    for (const args of [["find-generic-password", "-a", s.id, "-w"], ["find-generic-password", "-l", s.id, "-w"], ["find-generic-password", "-s", s.id, "-w"]]) {
-      try {
-        const out = run("security", args).replace(/\n$/, "");
-        if (out) return { value: out, source: "macOS 钥匙串（经 lark-cli 引用）" };
-      } catch { /* 换一种查法 */ }
+  if (s && typeof s === "object") {
+    // 优先尝试新版 lark-cli 安全存储解密（AES-256-GCM）
+    if (s.id) {
+      const dec = decryptLarkCliSecret(s.id);
+      if (dec) return { value: dec, source: "lark-cli 安全存储（自动解密）" };
+    }
+    // 旧版回退：直接通过 security 查明文
+    if (s.source === "keychain" && s.id && process.platform === "darwin") {
+      for (const args of [["find-generic-password", "-a", s.id, "-w"], ["find-generic-password", "-l", s.id, "-w"], ["find-generic-password", "-s", s.id, "-w"]]) {
+        try {
+          const out = run("security", args).replace(/\n$/, "");
+          if (out) return { value: out, source: "macOS 钥匙串（经 lark-cli 引用）" };
+        } catch { /* 换一种查法 */ }
+      }
     }
   }
   return null;
@@ -138,6 +246,151 @@ function extractBaseToken(input) {
   if (m) return m[1];
   const t = String(input).trim();
   return /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
+}
+
+// 自动探测和发现多维表格 Base（通过 lark-cli / tempBus 搜索及本机已有配置，并验证标准表）
+async function discoverCandidateBases(tempBus) {
+  const candidates = [];
+  const seen = new Set();
+
+  const add = (token, name, source) => {
+    const t = extractBaseToken(token);
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    candidates.push({ token: t, name: name || t, source });
+  };
+
+  const addEntity = (o, source) => {
+    if (!o || typeof o !== "object") return;
+    if (o.docs_type && o.docs_type !== "bitable") return;
+    const tok = o.docs_token || o.token || o.file_token || o.doc_token;
+    const name = o.title || o.name;
+    add(tok, name, source);
+  };
+
+  // 1. 优先使用 tempBus 以 Bot 身份搜索（依次尝试关键词 ['Agent中台', 'Agent', '中台']，一旦找到候选即停）
+  if (tempBus && typeof tempBus.api === "function") {
+    for (const kw of ["Agent中台", "Agent", "中台"]) {
+      try {
+        const res = await tempBus.api("POST", "/suite/docs-api/search/object", {
+          search_key: kw,
+          count: 10,
+          docs_types: ["bitable"],
+        });
+        const objs = res?.docs_entities ?? res?.data?.docs_entities ?? [];
+        for (const o of objs) {
+          addEntity(o, `tempBus (bot) 搜索 "${kw}"`);
+        }
+        if (candidates.length > 0) break;
+      } catch { /* 忽略错误，继续下一个关键词或后续搜索方式 */ }
+    }
+  }
+
+  // 2. 若 tempBus 未搜出，尝试 lark-cli 以 bot 身份搜索
+  if (candidates.length === 0) {
+    for (const kw of ["Agent中台", "Agent", "中台"]) {
+      try {
+        const out = run("lark-cli", [
+          "api", "POST", "/open-apis/suite/docs-api/search/object",
+          "--data", JSON.stringify({ search_key: kw, count: 10, docs_types: ["bitable"] }),
+          "--as", "bot",
+          "--json",
+        ]);
+        const parsed = JSON.parse(out);
+        const objs = parsed?.data?.docs_entities ?? parsed?.docs_entities ?? [];
+        for (const o of objs) {
+          addEntity(o, `lark-cli bot 搜索 "${kw}"`);
+        }
+        if (candidates.length > 0) break;
+      } catch { /* 忽略错误 */ }
+    }
+  }
+
+  // 3. 尝试用 lark-cli 搜索 'Agent中台' 或 bitable 类型文件（user 身份）
+  if (candidates.length === 0) {
+    try {
+      const out = run("lark-cli", [
+        "drive", "+search",
+        "--doc-types", "bitable",
+        "--query", "Agent中台",
+        "--as", "user",
+        "--json",
+      ]);
+      const parsed = JSON.parse(out);
+      const docs = parsed?.docs ?? parsed?.data?.docs ?? parsed?.items ?? [];
+      for (const d of docs) {
+        addEntity(d, "lark-cli 搜索");
+      }
+    } catch { /* 忽略错误 */ }
+  }
+
+  if (candidates.length === 0) {
+    try {
+      const out = run("lark-cli", [
+        "drive", "+search",
+        "--doc-types", "bitable",
+        "--page-size", "10",
+        "--as", "user",
+        "--json",
+      ]);
+      const parsed = JSON.parse(out);
+      const docs = parsed?.docs ?? parsed?.data?.docs ?? parsed?.items ?? [];
+      for (const d of docs) {
+        addEntity(d, "lark-cli 搜索");
+      }
+    } catch { /* 忽略错误 */ }
+  }
+
+  if (candidates.length === 0) {
+    try {
+      const out = run("lark-cli", [
+        "api", "POST", "/open-apis/suite/docs-api/search/object",
+        "--data", JSON.stringify({ search_key: "Agent中台", count: 10, docs_types: ["bitable"] }),
+        "--as", "user",
+        "--json",
+      ]);
+      const parsed = JSON.parse(out);
+      const objs = parsed?.data?.docs_entities ?? parsed?.docs_entities ?? [];
+      for (const o of objs) {
+        addEntity(o, "docs-api 搜索");
+      }
+    } catch { /* 忽略错误 */ }
+  }
+
+  // 2. 检查本地已有配置
+  const knownConfigPaths = [
+    path.join(os.homedir(), ".hub-node", "node.json"),
+    path.join(os.homedir(), ".hub-node-hub", "node.json"),
+  ];
+  for (const p of knownConfigPaths) {
+    try {
+      if (fs.existsSync(p)) {
+        const d = JSON.parse(fs.readFileSync(p, "utf8"));
+        const token = d.baseToken;
+        if (token && !isPlaceholderToken(token)) {
+          add(token, "已有配置", p);
+        }
+      }
+    } catch { /* 忽略错误 */ }
+  }
+
+  // 3. 用 tempBus 校验哪些 Base 包含 6 张标准表，并补全名字
+  const verified = [];
+  for (const c of candidates) {
+    try {
+      const meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
+      if (meta?.app?.name) c.name = meta.app.name;
+      const tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
+      const names = new Set((tablesRes?.items ?? []).map((t) => t.name));
+      const hasAll = REQUIRED_TABLES.every((n) => names.has(n));
+      c.hasStandardTables = hasAll;
+      if (hasAll) verified.push(c);
+    } catch {
+      // 无法访问该 Base（无权限或不存在），跳过
+    }
+  }
+
+  return verified.length > 0 ? verified : candidates;
 }
 
 // install.sh 曾经把 example 直接种成 node.json。这些值仍是占位符时，
@@ -255,8 +508,16 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(`role: ${role}`);
     console.log(`config dir: ${configDir}`);
 
-    // 1. 凭据优先走环境变量或已有 600 app.env。两边都齐时跳过 lark-cli，
-    //    避免非交互首装去装 CLI 或把 Secret 放进命令行。
+    // 1. 优先检测本机是否安装了 lark-cli：若已安装则复用已配置的飞书应用；
+    //    未安装且无环境变量/app.env 凭据时，引导安装 lark-cli。
+    const lv = larkVersion();
+    let larkCfg = null;
+    if (lv) {
+      console.log(`  ✓ lark-cli 已安装（${lv}）`);
+      larkCfg = readLarkConfig();
+      if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
+    }
+
     const fromEnv = envSecret();
     const fileCreds = readLockedAppEnv(configDir);
     let appId = flags.appId || null;
@@ -265,16 +526,30 @@ export async function runSetup(configDir, argv, appDir) {
     if (!secret && fileCreds?.secret) { secret = fileCreds.secret; secretSource = "本机 app.env（600）"; }
     if (!appId && fileCreds?.appId) appId = fileCreds.appId;
 
-    let larkCfg = null;
     if (!(appId && secret)) {
-      if (!ensureLarkCli()) return 2;
-      larkCfg = readLarkConfig();
-      if (!larkCfg && !appId) {
-        console.error("  ✗ lark-cli 还没有配置任何飞书应用。");
-        console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `hub-node setup`。");
-        return 2;
+      if (!lv) {
+        if (!ensureLarkCli()) return 2;
+        larkCfg = readLarkConfig();
+        if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
       }
-      if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
+      if (!larkCfg && !appId) {
+        if (interactive) {
+          console.log("  · lark-cli 尚未配置应用，正在启动 lark-cli config init 引导配置…");
+          try {
+            execSync("lark-cli config init", { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
+            larkCfg = readLarkConfig();
+            if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
+          } catch (e) {
+            console.error("  ✗ lark-cli 配置引导未完成：" + e.message);
+            return 2;
+          }
+        }
+        if (!larkCfg && !appId) {
+          console.error("  ✗ lark-cli 还没有配置任何飞书应用。");
+          console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `hub-node setup`。");
+          return 2;
+        }
+      }
     }
 
     // 2. 选定应用并解析凭据
@@ -310,7 +585,39 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(`  ✓ 应用 ${appId}，凭据来源：${secretSource}`);
 
     // 3. Base 与表发现
-    const baseInput = flags.base || (await ask("把多维表格 Base 的链接粘贴进来（打开 Base 页面复制网址即可，或直接给 token）"));
+    let defaultBase = null;
+    let defaultBaseLabel = "";
+    if (!flags.base) {
+      const tempBus = new FeishuBus({ appId, appSecret: secret, baseToken: "", tables: {} });
+      const candidates = await discoverCandidateBases(tempBus);
+      if (candidates.length === 1) {
+        defaultBase = candidates[0].token;
+        defaultBaseLabel = candidates[0].name ? `${candidates[0].name}（${candidates[0].token}）` : candidates[0].token;
+        console.log(`  ✓ 自动发现多维表格 Base：${defaultBaseLabel}`);
+      } else if (candidates.length > 1) {
+        console.log("  · 发现多个候选多维表格 Base：");
+        candidates.forEach((c, idx) => {
+          console.log(`    ${idx + 1}. ${c.name} (${c.token})${c.hasStandardTables ? " [含6张标准表]" : ""}`);
+        });
+        if (interactive) {
+          const pick = await ask("选择要使用的 Base 序号或直接粘贴链接", "1");
+          const num = Number(pick);
+          if (Number.isInteger(num) && num >= 1 && num <= candidates.length) {
+            defaultBase = candidates[num - 1].token;
+            defaultBaseLabel = candidates[num - 1].name ? `${candidates[num - 1].name}（${candidates[num - 1].token}）` : candidates[num - 1].token;
+          } else {
+            defaultBase = extractBaseToken(pick) || pick;
+          }
+        } else {
+          defaultBase = candidates[0].token;
+        }
+      }
+    }
+
+    const basePrompt = defaultBaseLabel
+      ? "确认或修改多维表格 Base 链接/token"
+      : "把多维表格 Base 的链接粘贴进来（打开 Base 页面复制网址即可，或直接给 token）";
+    const baseInput = flags.base || (await ask(basePrompt, defaultBase || undefined));
     const baseToken = extractBaseToken(baseInput);
     if (!baseToken) { console.error("  ✗ 没能从输入里解析出 Base token。"); return 2; }
     const bus = new FeishuBus({ appId, appSecret: secret, baseToken, tables: {} });
@@ -462,7 +769,7 @@ export async function runSetup(configDir, argv, appDir) {
     }
 
     // 尝试向 Base 注册云文档事件订阅
-    const subRes = tryRegisterDriveSubscription(baseToken);
+    const subRes = tryRegisterDriveSubscription(baseToken, appId);
     if (subRes.success) {
       console.log("  ✓ 云文档事件订阅已成功注册到 Base（长连接秒级唤醒已就绪）");
       if (role === "node") {

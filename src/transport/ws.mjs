@@ -14,6 +14,9 @@
 //   - 非函数的值会跳过并记一条日志，避免一个坏配置弄断整条连接。
 
 import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import * as Lark from "@larksuiteoapi/node-sdk";
 
 const EVENT_TYPE = "drive.file.bitable_record_changed_v1";
@@ -30,11 +33,15 @@ export class FeishuEventReceiver {
     this.appSecret = appSecret;
     this.extraHandlers = extraHandlers ?? {};
     this._stopped = false;
+    this.ws = null;
+    this.busSockets = [];
+    this.usingLocalBus = false;
+    this.busConnected = false;
   }
 
   handle(data) {
     if (this._stopped) return;
-    const ev = data?.event ?? data ?? {};
+    const ev = data?.event ?? data?.payload ?? data ?? {};
     const fileToken = ev.file_token ?? ev.fileToken;
     if (fileToken && this.baseToken && fileToken !== this.baseToken) return;
     if (this.doorbellFile) {
@@ -48,7 +55,129 @@ export class FeishuEventReceiver {
     this.onEvent?.();
   }
 
-  start() {
+  _cleanupBusSockets() {
+    for (const sock of this.busSockets) {
+      try {
+        sock.removeAllListeners();
+        sock.destroy();
+      } catch { /* 忽略 */ }
+    }
+    this.busSockets = [];
+  }
+
+  _subscribedKeys() {
+    const keys = [EVENT_TYPE];
+    for (const [key, fn] of Object.entries(this.extraHandlers)) {
+      if (typeof fn === "function" && !keys.includes(key)) {
+        keys.push(key);
+      }
+    }
+    return keys;
+  }
+
+  _connectLocalBus(busSockPath) {
+    this.usingLocalBus = true;
+    this.busSockets = [];
+    let hasReportedReady = false;
+    let fallbackTriggered = false;
+
+    const triggerFallback = (reason) => {
+      if (this._stopped || fallbackTriggered) return;
+      fallbackTriggered = true;
+      const wasConnected = this.busConnected;
+      this.usingLocalBus = false;
+      this.busConnected = false;
+      if (wasConnected) {
+        this.onStatus?.(false);
+      }
+      this.log(`event receiver: local bus unavailable (${reason}), falling back to direct ws`);
+      this._cleanupBusSockets();
+      this._startWsClient();
+    };
+
+    const keys = this._subscribedKeys();
+    for (const key of keys) {
+      if (this._stopped || fallbackTriggered) break;
+      let buf = "";
+      let sock;
+      try {
+        sock = net.createConnection(busSockPath);
+      } catch (e) {
+        triggerFallback(`createConnection error: ${e.message}`);
+        break;
+      }
+      this.busSockets.push(sock);
+
+      sock.setTimeout(5000);
+      sock.on("timeout", () => {
+        sock.destroy();
+        triggerFallback(`connection timeout for ${key}`);
+      });
+
+      sock.on("connect", () => {
+        sock.setTimeout(0);
+        const handshake = JSON.stringify({
+          type: "hello",
+          pid: process.pid,
+          event_key: key,
+          subscription_id: key,
+          event_types: [key],
+        }) + "\n";
+        sock.write(handshake);
+      });
+
+      sock.on("data", (chunk) => {
+        if (this._stopped) return;
+        buf += chunk.toString("utf8");
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.type === "hello_ack") {
+              if (!hasReportedReady) {
+                hasReportedReady = true;
+                this.busConnected = true;
+                this.log("event receiver: attached to local lark-cli event bus");
+                this.onStatus?.(true);
+              }
+            } else if (msg.type === "event") {
+              const payload = msg.payload ?? msg.event ?? msg.data ?? msg;
+              if (key === EVENT_TYPE) {
+                this.handle(payload);
+                if (typeof this.extraHandlers[EVENT_TYPE] === "function") {
+                  Promise.resolve(this.extraHandlers[EVENT_TYPE](payload)).catch((e) => {
+                    this.log(`event receiver: extraHandler ${EVENT_TYPE} error: ${e?.message ?? e}`);
+                  });
+                }
+              } else if (typeof this.extraHandlers[key] === "function") {
+                Promise.resolve(this.extraHandlers[key](payload)).catch((e) => {
+                  this.log(`event receiver: extraHandler ${key} error: ${e?.message ?? e}`);
+                });
+              }
+            }
+          } catch (e) {
+            this.log(`event receiver: parse frame error: ${e.message}`);
+          }
+        }
+      });
+
+      sock.on("error", (err) => {
+        if (this._stopped) return;
+        triggerFallback(`socket error on ${key}: ${err.message}`);
+      });
+
+      sock.on("close", () => {
+        if (this._stopped) return;
+        triggerFallback(`socket closed for ${key}`);
+      });
+    }
+  }
+
+  _startWsClient() {
+    if (this._stopped || this.ws) return;
     const handles = {};
     for (const [key, fn] of Object.entries(this.extraHandlers)) {
       if (typeof fn === "function") handles[key] = fn;
@@ -86,8 +215,27 @@ export class FeishuEventReceiver {
     });
   }
 
+  start() {
+    this._stopped = false;
+    this.usingLocalBus = false;
+    this.busConnected = false;
+
+    const busSockPath = this.appId
+      ? path.join(os.homedir(), ".lark-cli", "events", this.appId, "bus.sock")
+      : null;
+
+    if (busSockPath && fs.existsSync(busSockPath)) {
+      this._connectLocalBus(busSockPath);
+    } else {
+      this._startWsClient();
+    }
+  }
+
   stop() {
     this._stopped = true;
+    this.usingLocalBus = false;
+    this.busConnected = false;
+    this._cleanupBusSockets();
     const ws = this.ws;
     this.ws = null;
     if (!ws?.close) return;

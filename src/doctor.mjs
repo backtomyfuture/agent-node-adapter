@@ -53,6 +53,20 @@ async function probeLan(socketPath, host, port) {
   }
 }
 
+function richPath() {
+  const extra = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local/bin")];
+  const cur = (process.env.PATH || "").split(path.delimiter);
+  return [...new Set([...extra, ...cur])].join(path.delimiter);
+}
+
+function getLarkVersion() {
+  try {
+    return execFileSync("lark-cli", ["--version"], { encoding: "utf8", env: { ...process.env, PATH: richPath() } }).trim();
+  } catch {
+    return null;
+  }
+}
+
 function roleFrom(argv, opts, raw) {
   if (opts?.role === "node" || opts?.role === "hub") return opts.role;
   for (let i = 0; i < argv.length; i++) {
@@ -134,10 +148,17 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
   }
 
-  // 3. 依赖（事件订阅用的飞书 SDK）
+  // 3. 依赖（事件订阅用的飞书 SDK 与 CLI）
   const sdkDir = path.join(appDir, "node_modules", "@larksuiteoapi", "node-sdk");
   if (fs.existsSync(sdkDir)) ok("依赖已安装（@larksuiteoapi/node-sdk）");
   else { bad("依赖未安装：在 app 目录跑 npm install"); problems++; }
+
+  const larkVer = getLarkVersion();
+  if (larkVer) ok(`lark-cli 已安装（${larkVer}）`);
+  else {
+    bad("未发现 lark-cli：请运行 npm install -g @larksuite/cli 安装");
+    problems++;
+  }
 
   // 4-6. 凭据与总线（loadConfig 成功 = 凭据齐备；再实测 token 与读表）
   let cfg = null;
@@ -150,11 +171,25 @@ export async function doctor(configDir, appDir, opts = {}) {
     problems++;
   }
   if (cfg) {
+    const baseToken = cfg.bus.baseToken;
     try {
       await cfg.bus.tenantToken();
       ok("飞书 tenant token 获取成功");
     } catch (e) {
       bad(`tenant token 失败：${e.message}`);
+      problems++;
+    }
+    try {
+      const appMeta = await cfg.bus.api("GET", `/bitable/v1/apps/${baseToken}`);
+      const baseName = appMeta?.app?.name || baseToken;
+      ok(`Base 元数据可访问：${baseName}`);
+    } catch (e) {
+      const msg = e?.message || "";
+      if (/403|91403|1254302|forbidden|permission/i.test(msg)) {
+        bad("多维表格读写权限不足：请打开该 Base 文档右上角「分享/协作」，将应用机器人添加为「可编辑」协作者");
+      } else {
+        bad(`Base 元数据访问失败：${msg}`);
+      }
       problems++;
     }
     try {
@@ -168,8 +203,67 @@ export async function doctor(configDir, appDir, opts = {}) {
       const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
       ok(`Tasks 可读：共 ${tasks.length} 条`);
     } catch (e) {
-      bad(`读表失败：${e.message}`);
+      const msg = e?.message || "";
+      if (/403|91403|1254302|forbidden|permission/i.test(msg)) {
+        bad("多维表格读写权限不足：请打开该 Base 文档右上角「分享/协作」，将应用机器人添加为「可编辑」协作者");
+      } else {
+        bad(`读表失败：${e.message}`);
+      }
       problems++;
+    }
+    if (role === "hub" || cfg.events === true) {
+      let isSubscribed = false;
+      let checkErr = null;
+      try {
+        const out = execFileSync("lark-cli", [
+          "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
+          "--params", JSON.stringify({ file_type: "bitable" }),
+          "--as", "user",
+          "--json",
+        ], { encoding: "utf8", env: { ...process.env, PATH: richPath() } });
+        const parsed = JSON.parse(out);
+        if (parsed?.data?.is_subscribe === true) {
+          isSubscribed = true;
+        } else {
+          checkErr = parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "is_subscribe=false" : out.trim());
+        }
+      } catch (e) {
+        checkErr = e.message;
+      }
+
+      if (isSubscribed) {
+        ok("云文档事件订阅已生效（User 身份，is_subscribe=true）");
+      } else {
+        bad(`云文档事件订阅未生效${checkErr ? `（${checkErr}）` : ""}`);
+        info(`修复命令：lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
+        problems++;
+      }
+    }
+    const busSockPath = cfg.bus?.appId
+      ? path.join(os.homedir(), ".lark-cli", "events", cfg.bus.appId, "bus.sock")
+      : null;
+    if (busSockPath && fs.existsSync(busSockPath)) {
+      let busAlive = false;
+      try {
+        const { createConnection } = await import("node:net");
+        await new Promise((resolve) => {
+          const s = createConnection(busSockPath, () => {
+            busAlive = true;
+            s.end();
+            resolve();
+          });
+          s.setTimeout(1500, () => { s.destroy(); resolve(); });
+          s.on("error", () => resolve());
+        });
+      } catch { /* 忽略探测异常 */ }
+
+      if (busAlive) {
+        ok(`发现本机 lark-cli Local Event Bus 在线（${busSockPath}，事件将无缝复用该 Bus）`);
+      } else {
+        info(`本机 lark-cli Local Event Bus socket 存在但无法连接（${busSockPath}，事件将直连飞书 WSClient）`);
+      }
+    } else {
+      info(`未发现本机 lark-cli Local Event Bus（${busSockPath || "~/.lark-cli/events/<appId>/bus.sock"}，事件将通过 WSClient 直连飞书）`);
     }
     if (role === "hub") {
       info(`唤醒方式：长连接（ws，表变更门铃 + card.action.trigger）＋ ${cfg.sweepSec}s 对账扫表（hub 角色强制长连接）`);

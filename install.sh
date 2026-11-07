@@ -39,14 +39,6 @@ fi
 cd "$APP"
 npm install --omit=dev --no-audit --no-fund
 
-# 凭据文件可以先摆一个空壳（600）；node.json / commands.json 留给 setup，
-# 避免把带占位符和 lan-exec 的 example 当成正式配置。
-if [ ! -f "$HOME_DIR/app.env" ]; then
-  printf 'APP_ID=\nAPP_SECRET=\n' > "$HOME_DIR/app.env"
-  chmod 600 "$HOME_DIR/app.env"
-  echo "已生成凭据文件：$HOME_DIR/app.env（需填入飞书应用的 APP_ID / APP_SECRET）"
-fi
-
 chmod +x "$APP/bin/hub-node.mjs"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$APP/bin/hub-node.mjs" "$HOME/.local/bin/hub-node"

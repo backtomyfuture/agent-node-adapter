@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+- 装机、自检与事件传输优化（复用本机 `lark-cli` 与 Local Event Bus）：
+  - `install.sh` 移除预先生成空壳 `app.env` 的步骤；
+  - `hub-node setup` 优先检测并复用本机 `lark-cli`（支持新版 `lark-cli` AES-256-GCM 安全存储自动解密、未初始化时自动调起 `lark-cli config init`、自动探测包含 6 张标准表的多维表格 Base 作为默认值、以 `--as user` 注册并校验云文档事件订阅）；
+  - `hub-node doctor` 新增 `lark-cli` 检查、Base 协作者可编辑权限提示、`--as user` 云文档事件订阅状态（`is_subscribe`）自检及本机 `lark-cli` Local Event Bus（`bus.sock`）状态检查；
+  - `src/transport/ws.mjs` 优先复用本机 `~/.lark-cli/events/<appId>/bus.sock` 共享长连接事件流，避免同 AppID 多连接分流丢事件。
+
 - 仓库只保留 Node。删除 `hub/` 下的 Python 枢纽（含接收端、呈递扫描、审批发卡、systemd 单元与自愈脚本）和 `schema/generate_schema.py`。Base 结构生成器改为 `schema/generate_schema.mjs`（Node >= 20、全局 `fetch`，不新增依赖）；生成物页眉字符串未改，以便与现有 `schema/base-schema.json`、`docs/base-schema.md` 逐字节一致。
 - `hub-node daemon` 省略 `--role` 时与 doctor、service 一样：先读配置目录 `node.json` 的 `role`，缺省 node。
 - `hub-node task create` 为现行建单入口（先写 instruction 与 Parts，最后写 Tasks 行）。Rules 自动路由仍为计划。hub 角色的呈递、审批与陈旧告警由 `src/hub/` 在同一守护进程里完成，状态文件在配置目录（`approval_state.json`、`present_state.json`、`stale_state.json`）。
