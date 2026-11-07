@@ -740,7 +740,9 @@ export function setupHelpText() {
             [--node <名>] [--zone <区>] [--prefix <前缀>] [--desc <描述>]
             [--base <token>] [--app-id <id>] [--owner <open_id>]
 
-  --wake    非交互时选择唤醒方式：event/ws、poll、sweep/automation
+  --wake    非交互时选择唤醒方式：event/ws、poll、sweep
+            sweep 登记 poll，轮询间隔不超过对账周期 900 秒。
+            automation 只属于手工登记的协议接入型节点，setup 不产出。
   --help    打印本帮助并退出，不进入向导，也不读取凭据`;
 }
 
@@ -749,8 +751,11 @@ export function normalizeWake(raw) {
   if (!s) return "";
   if (s === "1" || s === "ws" || s === "event") return "1";
   if (s === "2" || s === "poll") return "2";
-  if (s === "3" || s === "sweep" || s === "automation") return "3";
-  throw new Error(`未知 --wake：${raw}（应为 poll、event/ws 或 sweep/automation）`);
+  if (s === "3" || s === "sweep") return "3";
+  if (s === "automation") {
+    throw new Error("守护进程不能登记 automation。协议接入型节点的 Receive_Mode=automation 只能手工登记名片；--wake 请用 poll、event/ws 或 sweep");
+  }
+  throw new Error(`未知 --wake：${raw}（应为 poll、event/ws 或 sweep）`);
 }
 
 export async function runSetup(configDir, argv, appDir) {
@@ -1076,7 +1081,7 @@ export async function runSetup(configDir, argv, appDir) {
         console.log("\n  选择节点的任务唤醒机制（标准 v3.1 §10.3）：");
         console.log(`    1. ws${allEventsReady ? "（推荐）" : "（两层事件订阅未全就绪，需补齐后方可秒级唤醒）"}：长连接秒级事件唤醒 ＋ 15分钟对账兜底`);
         console.log("    2. poll：45秒固定短轮询 ＋ 15分钟对账兜底（无需事件订阅）");
-        console.log("    3. sweep / automation：仅15分钟对账扫表（或依赖飞书多维表格自动化出站通知）");
+        console.log("    3. sweep：轮询间隔不超过对账周期（900秒），名片登记 poll");
         wakeChoice = await ask("选择唤醒方式序号", wakeFlag || defaultWake);
       } else {
         wakeChoice = wakeFlag || defaultWake;
@@ -1086,10 +1091,14 @@ export async function runSetup(configDir, argv, appDir) {
         events = true;
         pollSec = 45;
         console.log("  ✓ 唤醒方式：长连接（ws）秒级事件 ＋ 15分钟对账兜底");
-      } else if (wakeChoice === "3" || /sweep|automation/i.test(wakeChoice)) {
+      } else if (/automation/i.test(String(wakeChoice))) {
+        console.error("  ✗ automation 不能由守护进程登记。协议接入型节点的 Receive_Mode=automation 只能手工登记名片。");
+        return 2;
+      } else if (wakeChoice === "3" || /^sweep$/i.test(String(wakeChoice).trim())) {
         events = false;
-        pollSec = sweepSec; // 900s
-        console.log("  ✓ 唤醒方式：仅15分钟低频对账扫表（sweep / automation）");
+        // 标准 §10.3：poll 的间隔不得长于对账周期（900 秒）。
+        pollSec = Math.min(sweepSec, 900);
+        console.log("  ✓ 唤醒方式：poll，间隔不超过对账周期 900 秒（sweep）");
       } else {
         events = false;
         pollSec = 45;
@@ -1131,7 +1140,7 @@ export async function runSetup(configDir, argv, appDir) {
       nodeDesc: nodeDesc || "",
       appEnv: appEnvPath,
       baseToken,
-      pollSec, // 修复 B10：使用前面分支算出的 pollSec 变量，sweep/automation 模式下为 900s，不再硬编码 45
+      pollSec, // sweep 也走这个变量：不超过对账周期，名片仍由 receiveModeOf 登记为 poll
       sweepSec: 900,
       events,
       doorbellFile: null,

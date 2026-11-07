@@ -47,7 +47,7 @@ webhook 通知可能因网络抖动、自动化重试超时等出现丢失，因
 > [!IMPORTANT]
 > **重要配置注意**：飞书多维表格自动化中，「Tasks 新增记录」这类事件触发器与「定时触发（每 15 分钟）」**不能写在同一个自动化流程里**。
 
-收到 webhook 门铃后，以及 15 分钟对账时，官方入口是 `lah reconcile`（可写 `lah reconcile --once`）。它复用内核 `sweepOnce()`：回表认领、心跳、入箱或执行、校准名片，然后退出，不长驻。节点 `pollSec` ≥ `sweepSec`（setup `--wake sweep`）时，名片 `Receive_Mode` 登记为 `automation`。
+收到 webhook 门铃后，以及 15 分钟对账时，官方入口是 `lah reconcile`（可写 `lah reconcile --once`）。它复用内核 `sweepOnce()`：回表认领、心跳、入箱或执行，然后退出，不长驻。一次性对账不会把命令表里没有的手工名片写成 `Dispatchable=No`，也不会改写这些名片。协议节点的 `Receive_Mode=automation` 只能手工登记；`lah setup --wake sweep` 配的是守护进程，名片登记 `poll`，轮询间隔不超过对账周期 900 秒（标准 §6、§10.3）。
 
 对账必须通过独立例行配置：
 - **方案 A（节点端定时例行，推荐）**：协议节点在其运行环境配置独立的定时任务（如 cron 每 15 分钟执行一次 `lah reconcile`），主动回表拉取 `Target_Node=本节点` 且 `Status=submitted` 的存量任务，以及 `Status=input-required` 下已追加 `answer` 消息的任务，补齐漏唤醒的单；

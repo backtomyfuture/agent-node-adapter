@@ -7,7 +7,7 @@
 //   task     task create：hub 角色建单。先写 instruction 与 Parts，最后写 Tasks 行。
 //   doctor   本机自检：配置、凭据、总线连通、能力登记、自启状态（M3）
 //   inventory 只读盘点本节点名片与任务，不写入
-//   reconcile 单次回表认领/对账后退出（webhook 或 15 分钟兜底）
+//   reconcile 单次回表认领/对账后退出（webhook 或 15 分钟兜底；不停派手工名片）
 //            --probe <host:port> 经在线 carrier 做一次只读 TCP 探测
 //   service  注册/卸载开机自启：macOS launchd / Linux systemd 用户级（M3）
 //   host     carrier 语境进程：在用户终端里常驻，替守护进程代跑需要
@@ -555,9 +555,9 @@ if (cmd === "setup") {
 } else {
   console.log(`lah ${DAEMON_VERSION}
 用法：
-  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--wake poll|event|sweep] [--skip-skill]  一键配置向导（首次装机跑这个）
+  lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--wake poll|event|sweep] [--skip-skill]  一键配置向导（sweep 登记 poll，间隔不超过 900 秒）
   lah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
-  lah reconcile [--config <dir>]  单次回表认领/对账后退出（webhook 或 15 分钟兜底；不长驻）
+  lah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）
   lah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入
   lah doctor  [--config <dir>] [--role node|hub] [--probe <host:port>]  本机自检
   lah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）

@@ -159,8 +159,9 @@ export function loadConfig(configDir) {
 
 
 export function receiveModeOf(cfg) {
+  // 标准 §6 / §10.3：守护进程只登记 event 或 poll。
+  // automation 只给协议接入型节点，而且只能来自手工名片，不能由本函数产出。
   if (cfg?.events || cfg?.doorbellFile) return "event";
-  if ((cfg?.pollSec ?? 45) >= (cfg?.sweepSec ?? 900)) return "automation";
   return "poll";
 }
 
